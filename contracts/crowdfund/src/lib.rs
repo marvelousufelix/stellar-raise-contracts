@@ -9,6 +9,8 @@ use soroban_sdk::{
 pub mod refund_single_token;
 use refund_single_token::refund_single_transfer;
 
+pub mod soroban_sdk_minor;
+
 #[cfg(test)]
 mod auth_tests;
 pub mod campaign_goal_minimum;
