@@ -25,6 +25,13 @@ fn check_auth(env: Env, user: Address) -> bool;
 
 /// Return the stored admin address.
 fn get_admin(env: Env) -> Address;
+
+/// Emit a small typed event with topic `ping`.
+///
+/// - `emit_ping(env, from, value)` requires `from` to authorize the call.
+/// - Demonstrates that event topics should be short `Symbol`s and payloads
+///   must be `Val`-compatible (primitive/contracttype) under v22.
+fn emit_ping(env: Env, from: Address, value: i32);
 ```
 
 ## Logging Bounds
