@@ -1,41 +1,37 @@
-//! contribute() error handling — reviewed and hardened.
+//! # contribute_error_handling
 //!
-//! This module documents and re-exports the error variants relevant to
-//! `contribute()`, and provides helper functions used by scripts and
-//! off-chain tooling to interpret contract errors.
+//! @title   ContributeErrorHandling — Centralized error codes and helpers for
+//!          the `contribute()` and `pledge()` entry points.
 //!
-//! # Error taxonomy for `contribute()`
+//! @notice  All error conditions that can arise during a contribution are
+//!          represented as typed `ContractError` variants.  This module
+//!          re-exports their numeric codes and provides off-chain helpers so
+//!          scripts can map a raw error code to a human-readable description
+//!          without embedding magic numbers.
 //!
-//! | Code | Variant              | Trigger                                      |
-//! |------|----------------------|----------------------------------------------|
-//! |  2   | `CampaignEnded`      | `ledger.timestamp > deadline`                |
-//! |  6   | `Overflow`           | contribution or total_raised would overflow  |
-//! |  —   | panic "not init"     | storage key missing (contract not initialized)|
-//! |  —   | panic "below min"    | `amount < min_contribution`                  |
+//! @dev     ## Error taxonomy for `contribute()`
 //!
-//! # Security assumptions
+//!          | Code | Variant         | Trigger                                        |
+//!          |------|-----------------|------------------------------------------------|
+//!          |  2   | `CampaignEnded` | `ledger.timestamp > deadline`                  |
+//!          |  6   | `Overflow`      | `checked_add` would wrap on contribution totals|
+//!          |  9   | `AmountTooLow`  | `amount < min_contribution`                    |
 //!
-//! - `contributor.require_auth()` is called before any state mutation, so
-//!   unauthenticated callers are rejected at the host level.
-//! - Token transfer happens before storage writes; if the transfer fails the
-//!   transaction is rolled back atomically — no partial state is persisted.
-//! - Overflow is caught with `checked_add` on both the per-contributor total
-//!   and the global total, returning `ContractError::Overflow` rather than
-//!   wrapping silently.
-//! - The deadline check uses `>` (strict), so contributions at exactly the
-//!   deadline timestamp are accepted — scripts should account for this.
+//! @dev     ## Security assumptions
 //!
-//! # Known limitations / improvement opportunities
-//!
-//! 1. `amount < min_contribution` currently panics instead of returning a
-//!    typed error. Scripts cannot distinguish this from other panics.
-//!    Recommendation: add `ContractError::BelowMinimum` and return it.
-//! 2. There is no check that `amount > 0`. A zero-amount contribution passes
-//!    the minimum check when `min_contribution == 0` and wastes gas.
-//!    Recommendation: add `ContractError::ZeroAmount`.
-//! 3. The campaign `Status` is not checked in `contribute()`. A cancelled or
-//!    successfully-withdrawn campaign still accepts contributions until the
-//!    deadline. Recommendation: guard on `Status::Active`.
+//!          - `contributor.require_auth()` is called before any state mutation;
+//!            unauthenticated callers are rejected at the host level.
+//!          - Token transfer happens before storage writes; if the transfer
+//!            fails the transaction rolls back atomically — no partial state.
+//!          - Overflow is caught with `checked_add` on both the per-contributor
+//!            total and `total_raised`, returning `ContractError::Overflow`
+//!            rather than wrapping silently.
+//!          - The deadline check uses strict `>`, so a contribution at exactly
+//!            the deadline timestamp is accepted.  Scripts should account for
+//!            this boundary when computing whether a campaign is still open.
+//!          - `AmountTooLow` is now a typed error (code 9), replacing the
+//!            previous `panic!("amount below minimum")`.  Scripts can
+//!            distinguish it from host-level panics.
 
 /// Numeric error codes returned by the contract host for `contribute()`.
 /// Mirrors `ContractError` repr values for use in off-chain scripts.
@@ -44,28 +40,31 @@ pub mod error_codes {
     pub const CAMPAIGN_ENDED: u32 = 2;
     /// A checked arithmetic operation overflowed.
     pub const OVERFLOW: u32 = 6;
+    /// The contribution amount is below the campaign's minimum.
+    pub const AMOUNT_TOO_LOW: u32 = 9;
 }
 
 /// Returns a human-readable description for a `contribute()` error code.
 ///
-/// # Example
-/// ```
-/// use contribute_error_handling::describe_error;
-/// assert_eq!(describe_error(2), "Campaign has ended");
-/// ```
+/// @param  code  The `ContractError` repr value (e.g. from `e as u32`).
+/// @return       A static string suitable for logging or user-facing messages.
+///
+/// @dev    Off-chain scripts should use this instead of hardcoding strings so
+///         that a future code change only requires updating this one function.
 pub fn describe_error(code: u32) -> &'static str {
     match code {
         error_codes::CAMPAIGN_ENDED => "Campaign has ended",
         error_codes::OVERFLOW => "Arithmetic overflow — contribution amount too large",
+        error_codes::AMOUNT_TOO_LOW => "Contribution amount is below the campaign minimum",
         _ => "Unknown error",
     }
 }
 
 /// Returns `true` if the error code is retryable by the caller.
 ///
-/// `CampaignEnded` and `Overflow` are permanent for the current campaign
-/// state; neither can be resolved by retrying the same call.
+/// @param  code  The `ContractError` repr value.
+/// @return       `false` for all known `contribute()` errors — none can be
+///               resolved by retrying the same call without a state change.
 pub fn is_retryable(_code: u32) -> bool {
-    // Neither known error is retryable without a state change.
     false
 }
