@@ -85,6 +85,21 @@ pub enum StateSizeError {
     StringTooLong = 103,
 }
 
+impl core::fmt::Display for StateSizeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            StateSizeError::ContributorLimitExceeded => {
+                f.write_str("contributor limit exceeded")
+            }
+            StateSizeError::RoadmapLimitExceeded => f.write_str("roadmap limit exceeded"),
+            StateSizeError::StretchGoalLimitExceeded => {
+                f.write_str("stretch goal limit exceeded")
+            }
+            StateSizeError::StringTooLong => f.write_str("string too long"),
+        }
+    }
+}
+
 // ── Validation helpers ────────────────────────────────────────────────────────
 
 /// Validate title length.
@@ -258,3 +273,4 @@ pub fn check_stretch_goal_limit(env: &Env) -> Result<(), StateSizeError> {
     }
     Ok(())
 }
+

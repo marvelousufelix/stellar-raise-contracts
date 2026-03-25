@@ -25,6 +25,7 @@ mod refund_single_token_test;
 
 pub mod soroban_sdk_minor;
 #[cfg(test)]
+mod soroban_sdk_minor_test;
 #[path = "stellar_token_minter_test.rs"]
 mod stellar_token_minter_test;
 
@@ -44,6 +45,9 @@ pub mod proptest_generator_boundary;
 #[cfg(test)]
 #[path = "proptest_generator_boundary.test.rs"]
 mod proptest_generator_boundary_tests;
+pub mod stellar_token_minter;
+#[cfg(test)]
+mod stellar_token_minter_test;
 #[cfg(test)]
 mod refund_single_token_tests;
 #[cfg(test)]
