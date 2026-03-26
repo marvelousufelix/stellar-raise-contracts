@@ -10,10 +10,11 @@
 //! - **State Management**: Uses persistent storage for token ID tracking and metadata.
 //! - **Bounded Operations**: Ensures all operations are within Soroban resource limits.
 
-#![no_std]
+// stellar_token_minter — NFT minting capabilities for the crowdfunding platform.
 
-// ── Test constants ────────────────────────────────────────────────────────────
-//
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol};
+
+// ── Test constants ────────────────────────────────────────────────────────────//
 // Centralised numeric literals used across the stellar_token_minter test suites.
 // Defining them here means CI/CD only needs to update one location when campaign
 // parameters change, and test intent is self-documenting.
@@ -81,6 +82,65 @@ pub const TEST_PARTIAL_CONTRIBUTION_A: i128 = 300_000;
 /// Second contribution amount used in the "partial accumulation" test.
 pub const TEST_PARTIAL_CONTRIBUTION_B: i128 = 200_000;
 
+// ── Event / mint budget helpers ───────────────────────────────────────────────
+
+/// Maximum events allowed per Soroban transaction.
+pub const MAX_EVENTS_PER_TX: u32 = 100;
+
+/// Maximum NFTs minted in a single `withdraw()` call.
+pub const MAX_MINT_BATCH: u32 = 50;
+
+/// Maximum log entries per transaction.
+pub const MAX_LOG_ENTRIES: u32 = 64;
+
+/// Returns `true` if `emitted` is below `MAX_EVENTS_PER_TX`.
+#[inline]
+pub fn within_event_budget(emitted: u32) -> bool {
+    emitted < MAX_EVENTS_PER_TX
+}
+
+/// Returns `true` if `minted` is below `MAX_MINT_BATCH`.
+#[inline]
+pub fn within_mint_batch(minted: u32) -> bool {
+    minted < MAX_MINT_BATCH
+}
+
+/// Returns `true` if `logged` is below `MAX_LOG_ENTRIES`.
+#[inline]
+pub fn within_log_budget(logged: u32) -> bool {
+    logged < MAX_LOG_ENTRIES
+}
+
+/// Returns remaining event budget (saturates at 0).
+#[inline]
+pub fn remaining_event_budget(reserved: u32) -> u32 {
+    MAX_EVENTS_PER_TX.saturating_sub(reserved)
+}
+
+/// Returns remaining mint budget (saturates at 0).
+#[inline]
+pub fn remaining_mint_budget(minted: u32) -> u32 {
+    MAX_MINT_BATCH.saturating_sub(minted)
+}
+
+/// Emits a batch summary event if `count > 0` and budget is not exhausted.
+/// Returns `true` if the event was emitted.
+pub fn emit_batch_summary(
+    env: &Env,
+    topic: (&str, &str),
+    count: u32,
+    emitted_so_far: u32,
+) -> bool {
+    if count == 0 || !within_event_budget(emitted_so_far) {
+        return false;
+    }
+    env.events().publish(
+        (Symbol::new(env, topic.0), Symbol::new(env, topic.1)),
+        count,
+    );
+    true
+}
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -137,28 +197,37 @@ impl StellarTokenMinter {
 
         // Update total counter
         let total: u64 = env.storage().instance().get(&DataKey::TotalMinted).unwrap();
-        env.storage().instance().set(&DataKey::TotalMinted, &(total + 1));
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalMinted, &(total + 1));
 
         // Emit event
-        env.events().publish(
-            (Symbol::new(&env, "mint"), to),
-            token_id,
-        );
+        env.events()
+            .publish((Symbol::new(&env, "mint"), to), token_id);
     }
 
     /// Returns the owner of a token.
     pub fn owner(env: Env, token_id: u64) -> Option<Address> {
-        env.storage().persistent().get(&DataKey::TokenMetadata(token_id))
+        env.storage()
+            .persistent()
+            .get(&DataKey::TokenMetadata(token_id))
     }
 
     /// Returns the total number of NFTs minted.
     pub fn total_minted(env: Env) -> u64 {
-        env.storage().instance().get(&DataKey::TotalMinted).unwrap_or(0)
+        env.storage()
+            .instance()
+            .get(&DataKey::TotalMinted)
+            .unwrap_or(0)
     }
 
     /// Updates the minter address. Only callable by admin.
     pub fn set_minter(env: Env, admin: Address, new_minter: Address) {
-        let current_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        let current_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
         current_admin.require_auth();
         if admin != current_admin {
             panic!("unauthorized");

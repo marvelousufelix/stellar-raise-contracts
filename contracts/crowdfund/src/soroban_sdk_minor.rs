@@ -4,7 +4,6 @@
 //! minor Soroban SDK bump so behavior is explicit, testable, and audit-friendly.
 
 #[allow(dead_code)]
-
 use soroban_sdk::{contracttype, Address, BytesN, Env, String, Symbol};
 
 // ── Version metadata ─────────────────────────────────────────────────────────
@@ -162,7 +161,10 @@ pub fn pagination_window(offset: u32, requested_limit: u32) -> PaginationWindow 
     // Saturating add: if offset + limit would overflow u32, cap at u32::MAX.
     // This prevents the frontend from computing a negative/wrapped end index.
     let _end = offset.saturating_add(limit); // exposed for callers; stored for clarity
-    PaginationWindow { start: offset, limit }
+    PaginationWindow {
+        start: offset,
+        limit,
+    }
 }
 
 /// @notice Validate optional SDK-upgrade note used for UI/audit display.
