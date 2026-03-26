@@ -1,143 +1,134 @@
-# GitHub Actions Workflow Fixes
+# GitHub Actions Test Workflow — Script Reference
 
-## What was wrong
+## Overview
 
-Four bugs were found and fixed across the CI workflow files:
-
-### 1. `actions/checkout@v6` — non-existent action version (typo)
-
-**Files affected:** `rust_ci.yml`, `testnet_smoke.yml`
-
-`actions/checkout@v6` does not exist. The latest stable release is `v4`. Using a
-non-existent version causes every CI run to fail immediately at the checkout step.
-
-**Fix:** Changed `actions/checkout@v6` → `actions/checkout@v4` in both files.
-
-### 2. Duplicate WASM build step in `rust_ci.yml`
-
-The workflow built the WASM binary twice:
-
-```yaml
-# Step 1 — correct, scoped to the crowdfund crate
-- name: Build crowdfund WASM for tests
-  run: cargo build --release --target wasm32-unknown-unknown -p crowdfund
-
-# Step 2 — redundant, rebuilds the same artifact
-- name: Build WASM (release)
-  run: cargo build --release --target wasm32-unknown-unknown
-```
-
-The second step added ~60–90 s of unnecessary compile time on every CI run
-without producing a different artifact.
-
-**Fix:** Removed the redundant second build step.
-
-### 3. Empty `spellcheck.yml`
-
-The file existed but contained only a single newline byte, so the spellcheck
-job never ran. Added a minimal working workflow using
-`streetsidesoftware/cspell-action@v6` that checks `*.md`, `*.yml`, and
-`*.yaml` files on push and pull-request events.
-
-### 4. `testnet_smoke.yml` — WASM build not scoped to `-p crowdfund`
-
-The smoke test built the entire workspace:
-
-```yaml
-- run: cargo build --target wasm32-unknown-unknown --release
-```
-
-This compiles every crate in the workspace unnecessarily, wasting CI time.
-
-**Fix:** Added `-p crowdfund` to scope the build to the single required crate:
-
-```yaml
-- run: cargo build --target wasm32-unknown-unknown --release -p crowdfund
-```
-
-### 5. `testnet_smoke.yml` — deprecated `soroban-cli` instead of `stellar-cli`
-
-The Soroban CLI was renamed to the Stellar CLI (`stellar-cli`). Installing
-`soroban-cli` installs an outdated, unmaintained package. All `soroban`
-subcommands (`soroban keys`, `soroban contract`) were updated to `stellar`.
-
-**Fix:** Changed `cargo install soroban-cli` → `cargo install stellar-cli` and
-updated all `soroban` command invocations to `stellar`.
-
-### 6. `rust_ci.yml` — no frontend UI test job
-
-The CI pipeline had no job to run Jest tests for the frontend. Frontend
-regressions could merge undetected.
-
-**Fix:** Added a `frontend` job that runs in parallel with the Rust `check` job:
-
-```yaml
-frontend:
-  name: Frontend UI Tests
-  runs-on: ubuntu-latest
-  steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-node@v4
-      with:
-        node-version: "20"
-        cache: "npm"          # caches node_modules between runs
-    - run: npm ci
-    - run: npm run test:coverage -- --ci --reporters=default
-```
-
-Key speed optimisations:
-- `cache: "npm"` in `setup-node` restores `~/.npm` automatically — no manual
-  `actions/cache` step needed.
-- Runs in parallel with the Rust job, so it adds zero wall-clock time to the
-  pipeline on a typical PR.
-- `--ci` flag disables interactive watch mode and fails fast on any test
-  failure.
+`github_actions_test.sh` validates the GitHub Actions workflow files in this
+repository. It enforces correctness, speed, and security rules that keep CI
+fast and reliable. The companion test file `github_actions_test.test.sh`
+exercises every check against both the real repository and synthetic fixtures.
 
 ---
 
-## Files changed
-
-| File | Change |
-|---|---|
-| `.github/workflows/rust_ci.yml` | `checkout@v6` → `checkout@v4`; removed duplicate WASM build step; added `frontend` job for UI tests |
-| `.github/workflows/testnet_smoke.yml` | `checkout@v6` → `checkout@v4`; added `-p crowdfund` to build step; `soroban-cli` → `stellar-cli`; all `soroban` commands → `stellar` |
-| `.github/workflows/spellcheck.yml` | Replaced empty file with working spellcheck workflow |
-
-## Validation scripts
+## Scripts
 
 | Script | Purpose |
 |---|---|
-| `scripts/github_actions_test.sh` | Validates workflow files in CI or locally (8 checks) |
-| `scripts/github_actions_test.test.sh` | Tests the validator against pass/fail scenarios (9 tests) |
+| `scripts/github_actions_test.sh` | Validates workflow files (8 checks) |
+| `scripts/github_actions_test.test.sh` | Tests the validator (14 tests, edge cases included) |
 
-Run locally:
+Run locally from the repository root:
 
 ```bash
 bash scripts/github_actions_test.sh
 bash scripts/github_actions_test.test.sh
 ```
 
-## Logging bounds added to `rust_ci.yml`
+---
 
-Three changes improve observability and prevent runaway builds:
+## Checks performed
 
-| What | Where | Value |
-|---|---|---|
-| Job hard timeout | `jobs.check.timeout-minutes` | 30 min |
-| WASM build step timeout | `Build crowdfund WASM for tests` step | 10 min |
-| Test step timeout | `Run tests` step | 15 min |
-| Elapsed-time log | `Log total job elapsed time` step (always runs) | soft warn at 20 min |
+### Check 1 — Required workflow files exist and are non-empty
 
-The elapsed-time step runs with `if: always()` so it fires even on failure,
-giving a timing signal for slow or hung jobs. It emits a `::warning::` annotation
-if the job exceeds the 20-minute soft target without failing the build.
+Verifies that `rust_ci.yml`, `testnet_smoke.yml`, and `spellcheck.yml` all
+exist under `.github/workflows/` and contain at least one byte. Missing or
+empty files silently disable CI jobs.
+
+### Check 2 — No workflow references `actions/checkout@v6`
+
+`actions/checkout@v6` does not exist. Any workflow referencing it fails
+immediately at the checkout step. The current stable release is `v4`.
+
+### Check 3 — No duplicate WASM build step in `rust_ci.yml`
+
+Building the WASM binary twice in the same job compiles identical artifacts
+and wastes 60–90 seconds of CI time per run. A single scoped build
+(`-p crowdfund`) is sufficient.
+
+### Check 4 — Smoke test does not call non-existent contract functions
+
+The functions `is_initialized` and `get_campaign_info` are not part of the
+crowdfund contract's public ABI. Calling them causes the smoke test to fail
+with a confusing on-chain error.
+
+### Check 5 — Smoke test `initialize` call includes `--admin`
+
+The crowdfund contract's `initialize` entry point requires an `--admin`
+argument. Omitting it causes the transaction to be rejected on-chain.
+
+### Check 6 — Smoke test WASM build is scoped to `-p crowdfund`
+
+Building the entire workspace compiles every crate unnecessarily. Scoping to
+`-p crowdfund` is 2–4× faster and avoids compiling crates that may not
+support the `wasm32` target.
+
+### Check 7 — Smoke test uses `stellar-cli`, not deprecated `soroban-cli`
+
+The Soroban CLI was renamed to the Stellar CLI. The old `soroban-cli` package
+is unmaintained and may contain unpatched vulnerabilities.
+
+### Check 8 — `rust_ci.yml` includes a `frontend` job
+
+Without a dedicated frontend job, Jest tests never run in CI. The frontend
+job runs in parallel with the Rust job, adding zero wall-clock time to the
+pipeline.
+
+---
+
+## Speed optimisations in `rust_ci.yml`
+
+| Optimisation | Detail |
+|---|---|
+| Single WASM build | Removed duplicate build step (~90 s saved per run) |
+| Scoped build (`-p crowdfund`) | Compiles only the required crate |
+| `Swatinem/rust-cache@v2` | Caches `~/.cargo` and `target/` between runs |
+| `cache: "npm"` in `setup-node` | Restores `~/.npm` automatically |
+| Parallel `frontend` job | UI tests run alongside Rust checks, not after |
+| `timeout-minutes` bounds | Job: 30 min · WASM build: 10 min · Tests: 15 min |
+| Elapsed-time log step | Fires on success and failure; warns if > 20 min |
+
+---
 
 ## Security notes
 
-- No secrets or credentials are introduced or modified.
-- The `actions/checkout@v4` pin is the current stable, audited release.
-- The spellcheck action runs with default (read-only) permissions.
+- The validator reads workflow files only — it never writes or executes them.
+- No secrets or credentials are accessed by the validator.
+- `set -euo pipefail` ensures unset variables and pipeline errors are fatal.
+- `actions/checkout@v4` is the current stable, audited release.
 - Using `stellar-cli` (the maintained successor) reduces supply-chain risk
   compared to the deprecated `soroban-cli` package.
-- `timeout-minutes` bounds prevent a compromised or infinite-looping dependency
-  from holding a runner indefinitely.
+- `timeout-minutes` bounds prevent a compromised or infinite-looping
+  dependency from holding a runner indefinitely.
+- The spellcheck action runs with default read-only permissions.
+
+---
+
+## Test coverage
+
+The test suite (`github_actions_test.test.sh`) covers:
+
+| Test | Scenario |
+|---|---|
+| 1 | Real repository passes all checks (happy path) |
+| 2 | `spellcheck.yml` is missing |
+| 3 | Workflow file exists but is empty (zero bytes) |
+| 4 | Workflow file contains only whitespace (documents current behaviour) |
+| 5 | `checkout@v6` typo in `rust_ci.yml` |
+| 6 | `checkout@v6` typo in `testnet_smoke.yml` |
+| 7 | Duplicate WASM build steps in `rust_ci.yml` |
+| 8 | Smoke test calls non-existent `is_initialized` |
+| 9 | Smoke test calls non-existent `get_campaign_info` |
+| 10 | Smoke test `initialize` missing `--admin` |
+| 11 | Smoke test WASM build missing `-p crowdfund` |
+| 12 | Smoke test uses deprecated `soroban-cli` |
+| 13 | `rust_ci.yml` missing `frontend` job |
+| 14 | Multiple simultaneous failures are all reported (no short-circuit) |
+
+---
+
+## What was fixed in the workflow files
+
+| File | Change |
+|---|---|
+| `.github/workflows/rust_ci.yml` | `checkout@v6` → `checkout@v4`; removed duplicate WASM build; added `frontend` job; added `timeout-minutes` bounds; added elapsed-time log step |
+| `.github/workflows/testnet_smoke.yml` | `checkout@v6` → `checkout@v4`; added `-p crowdfund`; `soroban-cli` → `stellar-cli`; all `soroban` commands → `stellar` |
+| `.github/workflows/spellcheck.yml` | Replaced empty file with working `cspell-action@v6` workflow |
