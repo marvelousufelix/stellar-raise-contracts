@@ -1,4 +1,4 @@
-# Campaign Goal Minimum Threshold Enforcement
+# Campaign Goal Minimum Threshold Enforcement — Security Refactor
 
 ## Overview
 
@@ -108,16 +108,14 @@ pub fn initialize(env: Env, goal: i128, /* … */) -> Result<(), ContractError> 
 }
 ```
 
-The `?` operator propagates `ContractError::GoalTooLow` to the caller without
-any additional boilerplate.
+### `validate_min_contribution(min_contribution: i128) -> Result<(), &'static str>`
 
-### Off-chain / SDK usage
+Rejects `min_contribution < MIN_CONTRIBUTION_AMOUNT`.
 
 ```rust
 use crowdfund::campaign_goal_minimum::validate_goal;
 
-validate_goal(proposed_goal).map_err(|e| anyhow::anyhow!(e))?;
-```
+### `validate_platform_fee(fee_bps: u32) -> Result<(), &'static str>`
 
 ### TypeScript / JavaScript (Stellar SDK)
 
@@ -136,7 +134,7 @@ try {
 
 ---
 
-## Security Assumptions
+### `compute_progress_bps(total_raised: i128, goal: i128) -> u32`
 
 | Assumption | Detail |
 |---|---|

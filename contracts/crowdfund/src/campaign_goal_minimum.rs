@@ -13,11 +13,13 @@
 /// A goal of zero enables a trivial drain exploit; 1 closes that surface.
 pub const MIN_GOAL_AMOUNT: i128 = 1;
 
-/// Creates a new campaign with goal validation.
+/// @notice Minimum allowed `min_contribution` value in token units.
 ///
-/// # Parameters
-/// - creator: campaign owner
-/// - goal: funding target
+/// @dev    Prevents contributions of 0 tokens, which would allow an attacker
+///         to register as a contributor without transferring any value.
+pub const MIN_CONTRIBUTION_AMOUNT: i128 = 1;
+
+/// @notice Maximum allowed platform fee in basis points (100% = 10_000 bps).
 ///
 /// # Security
 /// Ensures goal meets minimum threshold and creator is authenticated.
@@ -95,12 +97,9 @@ pub fn validate_platform_fee(fee_bps: u32) -> Result<(), &'static str> {
 /// contribution, letting the creator drain funds with no real commitment.
 /// Integer-overflow safety: single signed comparison, no arithmetic.
 #[inline]
-pub fn validate_goal_amount(
-    _env: &soroban_sdk::Env,
-    goal_amount: i128,
-) -> Result<(), crate::ContractError> {
-    if goal_amount < MIN_GOAL_AMOUNT {
-        return Err(crate::ContractError::GoalTooLow);
+pub fn validate_min_contribution(min_contribution: i128) -> Result<(), &'static str> {
+    if min_contribution < MIN_CONTRIBUTION_AMOUNT {
+        return Err("min_contribution must be at least MIN_CONTRIBUTION_AMOUNT");
     }
     Ok(())
 }
@@ -117,13 +116,27 @@ pub fn compute_progress_bps(total_raised: i128, goal: i128) -> u32 {
     Ok(())
 }
 
-/// Validates if a goal meets the minimum threshold.
+/// @notice Computes campaign funding progress in basis points.
 ///
-/// # Parameters
-/// - goal: the proposed goal
+/// @dev    `progress_bps = (total_raised * PROGRESS_BPS_SCALE) / goal`.
+///         Result is capped at `MAX_PROGRESS_BPS` for over-funded campaigns.
+///         Returns 0 when `goal <= 0` to avoid division by zero.
 ///
-/// # Returns
-/// true if the goal is secure and valid.
-pub fn validate_goal(goal: u64) -> bool {
-    goal >= MIN_CAMPAIGN_GOAL
+/// @param  total_raised  Total tokens raised so far.
+/// @param  goal          Campaign funding goal.
+/// @return               Progress in basis points, capped at `MAX_PROGRESS_BPS`.
+///
+/// @custom:security Uses `saturating_mul` to prevent overflow on very large
+///         `total_raised` values. The cap ensures the return value is always
+///         in `[0, MAX_PROGRESS_BPS]`.
+#[inline]
+pub fn compute_progress_bps(total_raised: i128, goal: i128) -> u32 {
+    if goal <= 0 {
+        return 0;
+    }
+    let raw = total_raised.saturating_mul(PROGRESS_BPS_SCALE) / goal;
+    if raw >= PROGRESS_BPS_SCALE {
+        return MAX_PROGRESS_BPS;
+    }
+    raw.max(0) as u32
 }

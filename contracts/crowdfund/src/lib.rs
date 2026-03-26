@@ -221,6 +221,8 @@ pub enum ContractError {
     InvalidPlatformFee = 11,
     /// Returned by `initialize` when `bonus_goal <= goal`.
     InvalidBonusGoal = 12,
+    /// Returned by `initialize` when `goal < MIN_GOAL_AMOUNT`.
+    GoalTooLow = 13,
 
     /// Returned by `contribute` when `amount` is zero.
     ZeroAmount = 8,
@@ -274,6 +276,7 @@ impl CrowdfundContract {
         goal: i128,
         deadline: u64,
         min_contribution: i128,
+        max_individual_contribution: Option<i128>,
         platform_config: Option<PlatformConfig>,
         bonus_goal: Option<i128>,
         bonus_goal_description: Option<String>,
@@ -1082,6 +1085,13 @@ impl CrowdfundContract {
             .instance()
             .get(&DataKey::MinContribution)
             .unwrap()
+    }
+
+    /// Returns the maximum individual contribution amount (if set).
+    pub fn max_individual_contribution(env: Env) -> Option<i128> {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxIndividualContribution)
     }
 
     /// Returns comprehensive campaign statistics.
