@@ -19,9 +19,9 @@
 //! | `nft_batch_minted` | `u32`                  | NFT contract set, minted_count > 0 |
 //! | `withdrawn`        | `(Address, i128, u32)` | Always on successful withdraw      |
 
-use soroban_sdk::{Address, Env, IntoVal, Symbol, Vec};
+use soroban_sdk::{Address, Env, Vec};
 
-use crate::{DataKey, MAX_NFT_MINT_BATCH};
+use crate::{DataKey, NftContractClient, MAX_NFT_MINT_BATCH};
 
 // ── Validated emit helpers ────────────────────────────────────────────────────
 
@@ -97,7 +97,7 @@ pub fn emit_withdrawn(env: &Env, creator: &Address, creator_payout: i128, nft_mi
 /// @custom:security Contributors beyond the cap are NOT permanently skipped —
 ///                  they can be minted in a subsequent call if needed.
 pub fn mint_nfts_in_batch(env: &Env, nft_contract: &Option<Address>) -> u32 {
-    let Some(nft_contract) = nft_contract else {
+    let Some(nft_addr) = nft_contract else {
         return 0;
     };
 
@@ -107,7 +107,7 @@ pub fn mint_nfts_in_batch(env: &Env, nft_contract: &Option<Address>) -> u32 {
         .get(&DataKey::Contributors)
         .unwrap_or_else(|| Vec::new(env));
 
-    let mut token_id: u64 = 1;
+    let client = NftContractClient::new(env, nft_addr);
     let mut minted: u32 = 0;
 
     for contributor in contributors.iter() {

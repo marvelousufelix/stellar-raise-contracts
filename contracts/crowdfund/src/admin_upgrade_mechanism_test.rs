@@ -167,7 +167,6 @@ fn upgrade_panics_before_initialize() {
 fn upgrade_rejects_non_admin() {
     let (env, contract_id, client, _admin, _creator) = setup();
     let non_admin = Address::generate(&env);
-
     env.set_auths(&[]);
     let result = client
         .mock_auths(&[MockAuth {

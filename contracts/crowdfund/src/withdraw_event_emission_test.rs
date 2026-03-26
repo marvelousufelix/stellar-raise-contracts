@@ -173,7 +173,6 @@ fn event_data(env: &Env, t1: &str, t2: &str) -> Option<Val> {
 
 // ── NFT minting cap ───────────────────────────────────────────────────────────
 
-/// Contributors below the cap: all are minted.
 #[test]
 fn test_withdraw_mints_all_when_within_cap() {
     let count = MAX_NFT_MINT_BATCH - 1;
@@ -182,7 +181,6 @@ fn test_withdraw_mints_all_when_within_cap() {
     assert_eq!(MockNftClient::new(&env, &nft_id).count(), count);
 }
 
-/// Contributors above the cap: only MAX_NFT_MINT_BATCH are minted.
 #[test]
 fn test_withdraw_caps_minting_at_max_batch() {
     let count = MAX_NFT_MINT_BATCH + 5;
@@ -191,7 +189,6 @@ fn test_withdraw_caps_minting_at_max_batch() {
     assert_eq!(MockNftClient::new(&env, &nft_id).count(), MAX_NFT_MINT_BATCH);
 }
 
-/// Exactly MAX_NFT_MINT_BATCH contributors: mints exactly the cap.
 #[test]
 fn test_withdraw_mints_exactly_at_cap_boundary() {
     let (env, client, _creator, _token, nft_id) = setup_with_nft(MAX_NFT_MINT_BATCH);
@@ -199,7 +196,6 @@ fn test_withdraw_mints_exactly_at_cap_boundary() {
     assert_eq!(MockNftClient::new(&env, &nft_id).count(), MAX_NFT_MINT_BATCH);
 }
 
-/// Single contributor: minted count is 1.
 #[test]
 fn test_withdraw_mints_single_contributor() {
     let (env, client, _creator, _token, nft_id) = setup_with_nft(1);
@@ -209,7 +205,6 @@ fn test_withdraw_mints_single_contributor() {
 
 // ── nft_batch_minted event ────────────────────────────────────────────────────
 
-/// Exactly one `nft_batch_minted` event is emitted (not one per contributor).
 #[test]
 fn test_withdraw_emits_single_batch_event() {
     let (env, client, _creator, _token, _nft) = setup_with_nft(5);
@@ -217,7 +212,6 @@ fn test_withdraw_emits_single_batch_event() {
     assert_eq!(count_events(&env, "campaign", "nft_batch_minted"), 1);
 }
 
-/// No `nft_batch_minted` event when NFT contract is not configured.
 #[test]
 fn test_withdraw_no_batch_event_without_nft_contract() {
     let (env, client, _creator, _token) = setup_no_nft(1_000);
@@ -225,7 +219,6 @@ fn test_withdraw_no_batch_event_without_nft_contract() {
     assert_eq!(count_events(&env, "campaign", "nft_batch_minted"), 0);
 }
 
-/// `nft_batch_minted` data equals the number of contributors minted.
 #[test]
 fn test_withdraw_batch_event_data_equals_minted_count() {
     let count: u32 = 3;
@@ -236,7 +229,6 @@ fn test_withdraw_batch_event_data_equals_minted_count() {
     assert_eq!(minted, count);
 }
 
-/// When contributors > cap, `nft_batch_minted` data equals MAX_NFT_MINT_BATCH.
 #[test]
 fn test_withdraw_batch_event_data_capped_at_max() {
     let (env, client, _creator, _token, _nft) = setup_with_nft(MAX_NFT_MINT_BATCH + 5);
@@ -248,7 +240,6 @@ fn test_withdraw_batch_event_data_capped_at_max() {
 
 // ── withdrawn event ───────────────────────────────────────────────────────────
 
-/// `withdrawn` event is emitted exactly once per withdraw() call.
 #[test]
 fn test_withdraw_emits_withdrawn_event_once() {
     let (env, client, _creator, _token, _nft) = setup_with_nft(2);
@@ -256,7 +247,6 @@ fn test_withdraw_emits_withdrawn_event_once() {
     assert_eq!(count_events(&env, "campaign", "withdrawn"), 1);
 }
 
-/// `withdrawn` event is emitted even when no NFT contract is set.
 #[test]
 fn test_withdraw_emits_withdrawn_event_without_nft() {
     let (env, client, _creator, _token) = setup_no_nft(1_000);
@@ -264,7 +254,6 @@ fn test_withdraw_emits_withdrawn_event_without_nft() {
     assert_eq!(count_events(&env, "campaign", "withdrawn"), 1);
 }
 
-/// `withdrawn` event nft_count field is 0 when no NFT contract is set.
 #[test]
 fn test_withdrawn_event_nft_count_zero_without_nft_contract() {
     let (env, client, _creator, _token) = setup_no_nft(1_000);
@@ -336,7 +325,6 @@ fn test_withdrawn_event_payout_reflects_fee_deduction() {
 
 // ── fee_transferred event ─────────────────────────────────────────────────────
 
-/// `fee_transferred` event is emitted when platform fee is configured.
 #[test]
 fn test_withdraw_emits_fee_transferred_event() {
     let env = Env::default();
@@ -378,7 +366,6 @@ fn test_withdraw_emits_fee_transferred_event() {
     assert_eq!(count_events(&env, "campaign", "fee_transferred"), 1);
 }
 
-/// No `fee_transferred` event when no platform fee is configured.
 #[test]
 fn test_withdraw_no_fee_event_without_platform_config() {
     let (env, client, _creator, _token) = setup_no_nft(1_000);
@@ -394,7 +381,7 @@ fn test_withdraw_no_fee_event_without_platform_config() {
 fn test_double_withdraw_panics() {
     let (_, client, _creator, _token) = setup_no_nft(1_000);
     client.withdraw();
-    client.withdraw(); // must panic
+    client.withdraw(); // must panic — status is no longer Succeeded
 }
 
 // ── Security unit tests for emit helpers ──────────────────────────────────────
