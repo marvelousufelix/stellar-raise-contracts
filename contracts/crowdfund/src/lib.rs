@@ -887,9 +887,21 @@ impl CrowdfundContract {
 
     /// Upgrade the contract to a new WASM implementation — admin-only.
     ///
-    /// Delegates to [`admin_upgrade_mechanism::upgrade`]. See that module for
-    /// full NatSpec documentation and security assumptions.
+    /// Validation order (cheapest checks first for gas efficiency):
+    /// 1. Reject zero hash — pure, no storage reads.
+    /// 2. Load admin + enforce `require_auth()`.
+    /// 3. Execute WASM swap.
+    /// 4. Emit audit event.
+    ///
+    /// # Panics
+    /// * `"zero wasm hash"` — if `new_wasm_hash` is all-zero bytes.
+    /// * `"Admin not initialized"` — if `initialize()` was never called.
+    /// * Auth error — if the caller is not the stored admin.
     pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) {
+        // Gas-efficiency edge case: reject zero hash before any storage read.
+        if !admin_upgrade_mechanism::validate_wasm_hash(&new_wasm_hash) {
+            panic!("zero wasm hash");
+        }
         let admin = admin_upgrade_mechanism::validate_admin_upgrade(&env);
         admin_upgrade_mechanism::perform_upgrade(&env, new_wasm_hash.clone());
 
