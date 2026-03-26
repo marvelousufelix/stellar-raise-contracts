@@ -14,6 +14,7 @@ pub mod cargo_toml_rust;
 pub mod contract_state_size;
 pub mod contribute_error_handling;
 pub mod crowdfund_initialize_function;
+pub mod npm_package_lock;
 pub mod proptest_generator_boundary;
 pub mod refund_single_token;
 pub mod soroban_sdk_minor;
@@ -66,6 +67,8 @@ mod contract_state_size_test;
 #[cfg(test)]
 mod contribute_error_handling_tests;
 #[cfg(test)]
+#[path = "npm_package_lock_test.rs"]
+mod npm_package_lock_test;
 
 #[cfg(test)]
 pub mod proptest_generator_boundary;
@@ -225,6 +228,7 @@ pub enum ContractError {
     CampaignNotActive = 10,
     /// Returned by `contribute` when `amount` is negative.
     NegativeAmount = 11,
+}
 
 /// Interface for an external NFT contract used to mint contributor rewards.
 #[contractclient(name = "NftContractClient")]
