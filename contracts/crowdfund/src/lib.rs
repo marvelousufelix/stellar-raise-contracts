@@ -24,6 +24,7 @@ pub mod stellar_token_minter;
 pub mod stream_processing_optimization;
 pub mod withdraw_event_emission;
 pub mod security_compliance_automation;
+pub mod security_analytics;
 
 // ── Imports from modules ──────────────────────────────────────────────────────
 
@@ -85,6 +86,9 @@ mod security_compliance_automation_test;
 #[cfg(test)]
 #[path = "role_based_access.test.rs"]
 mod role_based_access_test;
+#[cfg(test)]
+#[path = "security_analytics.test.rs"]
+mod security_analytics_test;
 
 // --- Constants ---
 const CONTRACT_VERSION: u32 = 3;
@@ -136,6 +140,33 @@ pub struct CampaignStats {
     pub contributor_count: u32,
     pub average_contribution: i128,
     pub largest_contribution: i128,
+}
+
+/// Security metric types tracked by the analytics system.
+/// Used for threat detection and security monitoring.
+#[derive(Clone, Copy, PartialEq, Debug)]
+#[contracttype]
+pub enum MetricType {
+    /// Total contribution transactions.
+    TotalContributions,
+    /// Total withdrawal transactions.
+    TotalWithdrawals,
+    /// Total refund transactions.
+    TotalRefunds,
+    /// Failed transaction attempts.
+    FailedTransactions,
+    /// Unique active contributors.
+    UniqueContributors,
+    /// Average contribution size.
+    AverageContributionSize,
+    /// Large transaction count (above threshold).
+    LargeTransactions,
+    /// Reverted transactions.
+    RevertedTransactions,
+    /// Auth failures.
+    AuthFailures,
+    /// Rate limit triggers.
+    RateLimitTriggers,
 }
 
 /// Represents all storage keys used by the crowdfund contract.
@@ -192,6 +223,16 @@ pub enum DataKey {
     GovernanceAddress,
     /// Boolean flag — when true, contribute() and withdraw() are blocked.
     Paused,
+
+    // ── Security Analytics keys ─────────────────────────────────────────────
+    /// Threat log storage key.
+    ThreatLog,
+    /// Access pattern storage keyed by address.
+    AccessPattern(Address),
+    /// Security metric storage keyed by address and metric type.
+    SecurityMetric(Address, MetricType),
+    /// Global security metric storage keyed by metric type.
+    GlobalSecurityMetric(MetricType),
 }
 
 // ── Contract Error ──────────────────────────────────────────────────────────
