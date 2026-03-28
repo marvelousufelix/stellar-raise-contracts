@@ -24,6 +24,8 @@ pub mod stream_processing_optimization;
 pub mod withdraw_event_emission;
 pub mod security_compliance_automation;
 pub mod security_analytics;
+pub mod network_optimization;
+pub mod resource_management;
 
 // ── Imports from modules ──────────────────────────────────────────────────────
 
@@ -88,6 +90,12 @@ mod role_based_access_test;
 #[cfg(test)]
 #[path = "security_analytics.test.rs"]
 mod security_analytics_test;
+#[cfg(test)]
+#[path = "network_optimization.test.rs"]
+mod network_optimization_test;
+#[cfg(test)]
+#[path = "resource_management.test.rs"]
+mod resource_management_test;
 
 // --- Constants ---
 const CONTRACT_VERSION: u32 = 3;
