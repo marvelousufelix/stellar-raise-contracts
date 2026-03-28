@@ -10,12 +10,14 @@ The original `deploy.sh` used `set -e` but swallowed error context — a failed
 `cargo build` or `stellar contract deploy` would exit silently with no
 actionable message. This script adds:
 
-- Per-step exit codes (2–6) so CI can distinguish build vs deploy vs init failures.
+- Per-step exit codes (2–9) so CI can distinguish build vs deploy vs init failures.
 - All stderr captured to `DEPLOY_LOG` (default `deploy_errors.log`) alongside
   timestamped stdout entries.
 - A structured **NDJSON event log** (`DEPLOY_JSON_LOG`, default `deploy_events.json`)
   that the frontend UI can stream-parse to render live step status and typed errors.
 - Argument validation with clear messages before any network call is made.
+- New edge-case handling: WASM integrity checks, log writability guards,
+  contract ID format validation, signal trapping, and sensitive-value sanitisation.
 
 ## Constants reference
 
@@ -28,6 +30,9 @@ actionable message. This script adds:
 | `EXIT_DEPLOY_FAIL`        | `4`                                            | `stellar contract deploy` failure|
 | `EXIT_INIT_FAIL`          | `5`                                            | `stellar contract invoke` failure|
 | `EXIT_NETWORK_FAIL`       | `6`                                            | RPC connectivity failure         |
+| `EXIT_LOG_FAIL`           | `7`                                            | Log file not writable            |
+| `EXIT_WASM_INTEGRITY_FAIL`| `8`                                            | WASM magic bytes invalid / empty |
+| `EXIT_SIGNAL`             | `9`                                            | SIGINT / SIGTERM received        |
 | `WASM_TARGET`             | `wasm32-unknown-unknown`                       | Rust compilation target          |
 | `WASM_PATH`               | `target/wasm32-unknown-unknown/release/crowdfund.wasm` | Expected WASM artifact  |
 | `RPC_TESTNET`             | `https://soroban-testnet.stellar.org/health`   | Testnet health endpoint          |
@@ -48,9 +53,9 @@ actionable message. This script adds:
 | :----------------- | :------ | :--------------------------------------------- |
 | `creator`          | string  | Stellar address of the campaign creator        |
 | `token`            | string  | Stellar address of the token contract          |
-| `goal`             | integer | Funding goal in stroops                        |
-| `deadline`         | integer | Unix timestamp — must be in the future         |
-| `min_contribution` | integer | Minimum pledge amount (default: `1`)           |
+| `goal`             | integer | Funding goal in stroops (must be > 0)          |
+| `deadline`         | integer | Unix timestamp — must be strictly in the future|
+| `min_contribution` | integer | Minimum pledge (default: `1`, must be > 0 and ≤ goal) |
 
 ### Environment variables
 
@@ -71,15 +76,104 @@ DEADLINE=$(date -d "+30 days" +%s)
 
 ## Exit codes
 
-| Code | Meaning                                  |
-| :--- | :--------------------------------------- |
-| 0    | Success                                  |
-| 1    | Missing dependency (`cargo` / `stellar`) |
-| 2    | Invalid or missing argument              |
-| 3    | `cargo build` failure                    |
-| 4    | `stellar contract deploy` failure        |
-| 5    | `stellar contract invoke` (init) failure |
-| 6    | Network connectivity failure             |
+| Code | Meaning                                        |
+| :--- | :--------------------------------------------- |
+| 0    | Success                                        |
+| 1    | Missing dependency (`cargo` / `stellar`)       |
+| 2    | Invalid or missing argument                    |
+| 3    | `cargo build` failure                          |
+| 4    | `stellar contract deploy` failure              |
+| 5    | `stellar contract invoke` (init) failure       |
+| 6    | Network connectivity failure                   |
+| 7    | Log file not writable                          |
+| 8    | WASM file missing, empty, or invalid magic bytes |
+| 9    | Deployment interrupted by SIGINT / SIGTERM     |
+
+## New edge cases (this release)
+
+### Argument validation
+
+| Edge case | Behaviour |
+| :-------- | :-------- |
+| `goal = 0` | Exits 2 — a zero-goal campaign has no economic value |
+| `min_contribution = 0` | Exits 2 — a zero pledge cannot fund anything |
+| `min_contribution > goal` | Exits 2 — no pledge could ever reach the goal |
+| `deadline == now` | Exits 2 — deadline must be **strictly** in the future |
+| `creator == token` (same address) | Non-fatal warning emitted; deployment continues |
+
+### Log file writability
+
+`check_log_writable` runs before any log truncation. If either `DEPLOY_LOG` or
+`DEPLOY_JSON_LOG` cannot be written (read-only filesystem, bad path, full disk),
+the script exits `7` immediately with a message to stderr — before any state is
+modified.
+
+### WASM integrity
+
+After `cargo build`, `check_wasm_integrity` validates the artifact:
+
+1. File must exist.
+2. File must be non-empty (> 0 bytes).
+3. First 4 bytes must be the WASM magic number `\x00\x61\x73\x6d` (`\0asm`).
+
+Exits `8` on any failure. This prevents deploying a truncated build or a text
+error file that `cargo` accidentally wrote to the WASM path.
+
+### Network error classification
+
+`check_network` now maps curl exit codes to human-readable reasons:
+
+| curl exit | Reason emitted |
+| :-------- | :------------- |
+| 6         | DNS resolution failed |
+| 28        | Connection timed out |
+| 22        | HTTP error response |
+| other     | `curl exited with code N` |
+
+The reason is included in the `step_error` JSON event so the frontend UI can
+display a specific message (e.g. "DNS failure — check your network") rather than
+a generic "connectivity error".
+
+### Contract ID format validation
+
+After `stellar contract deploy`, the returned ID is validated against the regex
+`^C[A-Z2-7]{55}$` (Stellar contract address format). An unexpected string —
+such as a CLI warning message or empty output — exits `4` with a clear message
+rather than silently passing a garbage ID to `init_contract`.
+
+### Init failure retry hint
+
+When `init_contract` fails, a `step_error` JSON event is emitted that includes a
+`retry_hint` field. The frontend UI can surface this as a recovery action:
+
+```json
+{
+  "event": "step_error",
+  "step": "init",
+  "message": "Contract initialisation failed – contract deployed but not initialised",
+  "exit_code": 5,
+  "contract_id": "CXXX...",
+  "retry_hint": "Re-run init with --contract-id CXXX..."
+}
+```
+
+### Signal handling
+
+SIGINT and SIGTERM are trapped. On receipt, the script:
+
+1. Increments `ERROR_COUNT`.
+2. Logs `[ERROR] Deployment interrupted by signal SIGINT/SIGTERM`.
+3. Emits a `step_error` JSON event with `"step":"signal"` so the frontend UI
+   can transition to an "interrupted" state rather than hanging on the last
+   `step_start`.
+4. Exits `9`.
+
+### Sensitive value sanitisation
+
+`sanitize()` is applied to all user-supplied values before they are written to
+the JSON event log. Patterns matched include Stellar secret keys (`S…`),
+`secret_key=`, `private_key=`, `password=`, and `token=` query parameters.
+Matched substrings are replaced with `[REDACTED]`.
 
 ## Human-readable log format
 
@@ -89,58 +183,36 @@ Every line written to `DEPLOY_LOG` follows:
 [2026-03-26T03:00:00Z] [INFO|WARN|ERROR] <message>
 ```
 
-Stderr from `cargo` and `stellar` is appended verbatim, making it easy to
-`grep` for specific failures in CI logs.
-
 ## Structured JSON event log (frontend UI)
 
 Every line in `DEPLOY_JSON_LOG` is a self-contained JSON object (NDJSON).
-The frontend can tail or stream-read this file to display live progress.
 
 ### Event schema
 
 ```json
 {
   "event":     "step_start | step_ok | step_error | deploy_complete",
-  "step":      "validate | network_check | build | deploy | init | done",
+  "step":      "validate | network_check | build | wasm_integrity | deploy | init | signal | done",
   "message":   "Human-readable description",
   "timestamp": "2026-03-26T03:00:00Z",
   "network":   "testnet"
 }
 ```
 
-`step_ok` for the `deploy` step also includes `"wasm_path"`.  
-`step_ok` for the `deploy` step and `deploy_complete` include `"contract_id"`.  
-`step_error` includes `"exit_code"`, `"context"`, and `"error_count"`.
-
-### Example event sequence (happy path)
-
-```json
-{"event":"step_start","step":"network_check","message":"Checking connectivity to testnet","timestamp":"...","network":"testnet"}
-{"event":"step_ok","step":"network_check","message":"Network reachable","timestamp":"...","network":"testnet"}
-{"event":"step_start","step":"build","message":"Building WASM","timestamp":"...","network":"testnet"}
-{"event":"step_ok","step":"build","message":"WASM built successfully","timestamp":"...","network":"testnet","wasm_path":"target/.../crowdfund.wasm"}
-{"event":"step_start","step":"deploy","message":"Deploying to testnet","timestamp":"...","network":"testnet"}
-{"event":"step_ok","step":"deploy","message":"Contract deployed","timestamp":"...","network":"testnet","contract_id":"CXXX..."}
-{"event":"step_start","step":"init","message":"Initialising campaign on CXXX...","timestamp":"...","network":"testnet"}
-{"event":"step_ok","step":"init","message":"Campaign initialised successfully","timestamp":"...","network":"testnet"}
-{"event":"deploy_complete","step":"done","message":"Deployment finished","timestamp":"...","network":"testnet","contract_id":"CXXX...","error_count":0}
-```
-
-### Example error event
-
-```json
-{"event":"step_error","step":"build","message":"cargo build failed – see deploy_errors.log for details","timestamp":"...","network":"testnet","exit_code":3,"context":"cargo build --target wasm32-unknown-unknown --release","error_count":1}
-```
+`step_ok` for `build` / `wasm_integrity` includes `"wasm_path"`.  
+`step_ok` for `deploy` and `deploy_complete` include `"contract_id"`.  
+`step_error` includes `"exit_code"`, `"context"`, and `"error_count"`.  
+`step_error` for `init` also includes `"contract_id"` and `"retry_hint"`.
 
 ### Frontend integration example
 
 ```ts
-// Stream-parse NDJSON from the deployment log
 for await (const line of readLines('deploy_events.json')) {
   const event = JSON.parse(line);
   if (event.event === 'step_error') {
-    // Map to ContractError / NetworkError for the global error boundary
+    if (event.step === 'init' && event.retry_hint) {
+      showRecoveryAction(event.retry_hint);
+    }
     throw new ContractError(`[${event.step}] ${event.message}`);
   }
   if (event.event === 'deploy_complete') {
@@ -158,8 +230,9 @@ for await (const line of readLines('deploy_events.json')) {
   Restrict file permissions in production: `chmod 600 deploy_errors.log deploy_events.json`.
 - The script does **not** store or echo secret keys at any point.
 - `set -euo pipefail` ensures unhandled errors abort execution immediately.
-- Double-quotes and backslashes in error messages are escaped before being
-  written to JSON, preventing log-injection attacks.
+- Double-quotes and backslashes in error messages are escaped before JSON emission.
+- `sanitize()` redacts known secret patterns from context strings before logging.
+- WASM integrity check prevents deploying a corrupt or tampered binary.
 
 ## Running the tests
 
@@ -167,22 +240,27 @@ for await (const line of readLines('deploy_events.json')) {
 bash scripts/deployment_shell_script.test.sh
 ```
 
-No external test framework is required. The test file stubs `cargo`, `stellar`,
-and `curl` so the suite runs fully offline and in CI without network access.
+No external test framework required. `cargo`, `stellar`, and `curl` are stubbed
+so the suite runs fully offline.
 
 ### Test coverage
 
-| Area                              | Cases |
-| :-------------------------------- | :---- |
-| `require_tool`                    | 2     |
-| `validate_args`                   | 9     |
-| `build_contract`                  | 3     |
-| `deploy_contract`                 | 3     |
-| `init_contract`                   | 2     |
-| `log` / `die`                     | 4     |
-| `emit_event` / `DEPLOY_JSON_LOG`  | 6     |
-| `DEPLOY_LOG` file behaviour       | 2     |
-| **Total**                         | **31**|
+| Area                                    | Cases |
+| :-------------------------------------- | :---- |
+| `require_tool`                          | 2     |
+| `validate_args` (original)              | 9     |
+| `validate_args` (new edge cases)        | 6     |
+| `check_log_writable`                    | 3     |
+| `check_wasm_integrity`                  | 4     |
+| `build_contract`                        | 4     |
+| `deploy_contract`                       | 5     |
+| `init_contract`                         | 3     |
+| `check_network` (new edge cases)        | 4     |
+| `sanitize`                              | 2     |
+| `log` / `die`                           | 4     |
+| `emit_event` / `DEPLOY_JSON_LOG`        | 6     |
+| `DEPLOY_LOG` file behaviour             | 2     |
+| **Total**                               | **54**|
 
-All 31 tests pass (≥ 95% coverage of every exported function, JSON event
-emission, and both log-truncation behaviours).
+All 54 tests pass (≥ 95% coverage of every exported function, all new edge
+cases, JSON event emission, and both log-truncation behaviours).

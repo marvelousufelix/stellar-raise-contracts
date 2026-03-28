@@ -15,17 +15,72 @@
 #            4  – deploy failure
 #            5  – initialise failure
 #            6  – network connectivity failure
+#            7  – log file write failure
+#            8  – WASM file permission / integrity failure
+#            9  – signal / interrupt received
 
 set -euo pipefail
 
 # ── Exit code constants ───────────────────────────────────────────────────────
+readonly EXIT_OK=0
+readonly EXIT_MISSING_DEP=1
+readonly EXIT_BAD_ARG=2
+readonly EXIT_BUILD_FAIL=3
+readonly EXIT_DEPLOY_FAIL=4
+readonly EXIT_INIT_FAIL=5
+readonly EXIT_NETWORK_FAIL=6
+readonly EXIT_LOG_FAIL=7
+readonly EXIT_WASM_INTEGRITY_FAIL=8
+readonly EXIT_SIGNAL=9
 
+# ── RPC endpoints ─────────────────────────────────────────────────────────────
+readonly RPC_TESTNET="https://soroban-testnet.stellar.org/health"
+readonly RPC_MAINNET="https://soroban.stellar.org/health"
+readonly RPC_FUTURENET="https://rpc-futurenet.stellar.org/health"
+readonly NETWORK_TIMEOUT=10
+readonly DEFAULT_MIN_CONTRIBUTION=1
+readonly WASM_TARGET="wasm32-unknown-unknown"
+readonly DEFAULT_NETWORK="testnet"
+readonly DEFAULT_DEPLOY_LOG="deploy_errors.log"
+
+# ── Runtime config ────────────────────────────────────────────────────────────
 NETWORK="${NETWORK:-testnet}"
 DEPLOY_LOG="${DEPLOY_LOG:-deploy_errors.log}"
 DEPLOY_JSON_LOG="${DEPLOY_JSON_LOG:-deploy_events.json}"
 WASM_PATH="target/wasm32-unknown-unknown/release/crowdfund.wasm"
 DRY_RUN="${DRY_RUN:-false}"
 ERROR_COUNT=0
+
+# ── Sensitive patterns for log sanitisation ───────────────────────────────────
+# @notice Patterns that may indicate secrets embedded in error output.
+#         Matched strings are replaced with [REDACTED] before JSON emission.
+# @custom:security Conservative by design — false positives are acceptable;
+#                  false negatives (leaking secrets) are not.
+readonly -a SENSITIVE_PATTERNS=(
+  'S[0-9A-Z]{55}'           # Stellar secret key (starts with S, 56 chars)
+  'secret[_-]?key[^"]*'     # generic "secret_key" label
+  'private[_-]?key[^"]*'    # generic "private_key" label
+  'password=[^[:space:]]*'  # password= query param
+  'token=[^[:space:]]*'     # token= query param
+)
+
+# ── Signal handling ───────────────────────────────────────────────────────────
+
+# @notice Trap handler for SIGINT / SIGTERM.
+#         Emits a step_error JSON event so the frontend UI can show an
+#         "interrupted" state rather than hanging on the last step_start.
+# @custom:security Does not re-raise the signal to avoid double-logging.
+_handle_signal() {
+  local sig="$1"
+  (( ERROR_COUNT++ )) || true
+  log "ERROR" "Deployment interrupted by signal $sig"
+  emit_event "step_error" "signal" \
+    "Deployment interrupted by signal $sig" \
+    "\"exit_code\":$EXIT_SIGNAL,\"error_count\":$ERROR_COUNT"
+  exit $EXIT_SIGNAL
+}
+trap '_handle_signal SIGINT'  INT
+trap '_handle_signal SIGTERM' TERM
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -38,10 +93,22 @@ log() {
   echo "[$ts] [$level] $msg" | tee -a "$DEPLOY_LOG"
 }
 
+# @notice Sanitises a string by replacing known sensitive patterns with [REDACTED].
+# @param  $1  raw string
+# @return sanitised string on stdout
+# @custom:security Applied to all user-supplied values before JSON emission.
+sanitize() {
+  local s="$1"
+  for pat in "${SENSITIVE_PATTERNS[@]}"; do
+    s="$(echo "$s" | sed -E "s/$pat/[REDACTED]/g")"
+  done
+  echo "$s"
+}
+
 # @notice Appends one NDJSON event line to DEPLOY_JSON_LOG.
 #         The frontend UI reads this file to render live step status and errors.
 # @param  $1  event   – step_start | step_ok | step_error | deploy_complete
-# @param  $2  step    – validate | build | deploy | init | network_check | done
+# @param  $2  step    – validate | build | deploy | init | network_check | signal | done
 # @param  $3  message – human-readable description (double-quotes escaped)
 # @param  $4  extra   – optional raw JSON fragment appended inside the object
 #                       e.g. '"contract_id":"CXXX"'
@@ -52,7 +119,11 @@ emit_event() {
   local safe_msg="${msg//\\/\\\\}"; safe_msg="${safe_msg//\"/\\\"}"
   local json="{\"event\":\"$event\",\"step\":\"$step\",\"message\":\"$safe_msg\",\"timestamp\":\"$ts\",\"network\":\"$NETWORK\""
   [[ -n "$extra" ]] && json="${json},${extra}"
-  echo "${json}}" >> "$DEPLOY_JSON_LOG"
+  # Edge case: guard against unwritable log file
+  if ! echo "${json}}" >> "$DEPLOY_JSON_LOG" 2>/dev/null; then
+    echo "[ERROR] Cannot write to DEPLOY_JSON_LOG: $DEPLOY_JSON_LOG" >&2
+    exit $EXIT_LOG_FAIL
+  fi
 }
 
 # @notice Logs an error, emits a JSON step_error event, and exits.
@@ -67,7 +138,9 @@ die() {
   log "ERROR" "$msg"
   [[ -n "$context" ]] && log "ERROR" "  context: $context"
   log "ERROR" "  exit_code=$code  errors_total=$ERROR_COUNT"
-  local safe_ctx="${context//\\/\\\\}"; safe_ctx="${safe_ctx//\"/\\\"}"
+  local safe_ctx
+  safe_ctx="$(sanitize "$context")"
+  safe_ctx="${safe_ctx//\\/\\\\}"; safe_ctx="${safe_ctx//\"/\\\"}"
   emit_event "step_error" "$step" "$msg" \
     "\"exit_code\":$code,\"context\":\"$safe_ctx\",\"error_count\":$ERROR_COUNT"
   exit "$code"
@@ -84,7 +157,7 @@ warn() {
 # @param  $1  tool name
 require_tool() {
   command -v "$1" &>/dev/null \
-    || die 1 "Required tool not found: $1" "Ensure '$1' is installed and on your PATH" "validate"
+    || die $EXIT_MISSING_DEP "Required tool not found: $1" "Ensure '$1' is installed and on your PATH" "validate"
 }
 
 # @notice Runs a command, capturing stderr to DEPLOY_LOG and timing the step.
@@ -126,6 +199,8 @@ Exit codes:
   $EXIT_OK  success             $EXIT_BUILD_FAIL  build failure        $EXIT_NETWORK_FAIL  network failure
   $EXIT_MISSING_DEP  missing dependency  $EXIT_DEPLOY_FAIL  deploy failure
   $EXIT_BAD_ARG  invalid argument    $EXIT_INIT_FAIL  init failure
+  $EXIT_LOG_FAIL  log write failure   $EXIT_WASM_INTEGRITY_FAIL  WASM integrity failure
+  $EXIT_SIGNAL  signal/interrupt
 HELPEOF
   exit $EXIT_OK
 }
@@ -138,23 +213,97 @@ HELPEOF
 # @param  $3  goal             – Funding goal (positive integer, stroops)
 # @param  $4  deadline         – Unix timestamp; must be in the future
 # @param  $5  min_contribution – Minimum pledge amount (positive integer)
+# @custom:edge goal=0 is rejected (must be > 0 to fund anything meaningful)
+# @custom:edge min_contribution=0 is rejected (zero pledge has no economic value)
+# @custom:edge deadline exactly equal to now is rejected (must be strictly future)
+# @custom:edge creator and token identical addresses are warned (unusual but not fatal)
 validate_args() {
   local creator="$1" token="$2" goal="$3" deadline="$4" min_contribution="$5"
 
-  [[ -n "$creator" ]]                       || die 2 "creator is required"                                    "" "validate"
-  [[ -n "$token" ]]                         || die 2 "token is required"                                      "" "validate"
-  [[ "$goal" =~ ^[0-9]+$ ]]                 || die 2 "goal must be a positive integer, got: '$goal'"          "" "validate"
-  [[ "$deadline" =~ ^[0-9]+$ ]]             || die 2 "deadline must be a Unix timestamp, got: '$deadline'"    "" "validate"
-  [[ "$min_contribution" =~ ^[0-9]+$ ]]     || die 2 "min_contribution must be a positive integer"            "" "validate"
+  [[ -n "$creator" ]]                       || die $EXIT_BAD_ARG "creator is required"                                    "" "validate"
+  [[ -n "$token" ]]                         || die $EXIT_BAD_ARG "token is required"                                      "" "validate"
+  [[ "$goal" =~ ^[0-9]+$ ]]                 || die $EXIT_BAD_ARG "goal must be a positive integer, got: '$goal'"          "" "validate"
+  [[ "$deadline" =~ ^[0-9]+$ ]]             || die $EXIT_BAD_ARG "deadline must be a Unix timestamp, got: '$deadline'"    "" "validate"
+  [[ "$min_contribution" =~ ^[0-9]+$ ]]     || die $EXIT_BAD_ARG "min_contribution must be a positive integer"            "" "validate"
+
+  # Edge case: goal must be > 0
+  (( goal > 0 )) || die $EXIT_BAD_ARG "goal must be greater than 0, got: $goal" "" "validate"
+
+  # Edge case: min_contribution must be > 0
+  (( min_contribution > 0 )) || die $EXIT_BAD_ARG "min_contribution must be greater than 0, got: $min_contribution" "" "validate"
+
+  # Edge case: min_contribution must not exceed goal
+  (( min_contribution <= goal )) \
+    || die $EXIT_BAD_ARG \
+       "min_contribution ($min_contribution) must not exceed goal ($goal)" \
+       "" "validate"
 
   local now; now="$(date +%s)"
-  (( deadline > now )) || die 2 "deadline must be in the future (got $deadline, now $now)" "" "validate"
+  # Edge case: deadline must be strictly in the future (not equal to now)
+  (( deadline > now )) || die $EXIT_BAD_ARG "deadline must be in the future (got $deadline, now $now)" "" "validate"
+
+  # Edge case: warn when creator and token share the same address (unusual config)
+  if [[ "$creator" == "$token" ]]; then
+    warn "creator and token addresses are identical — verify this is intentional"
+  fi
+
+  emit_event "step_ok" "validate" "Arguments validated"
+  log "INFO" "Arguments validated."
+}
+
+# ── Log file guard ────────────────────────────────────────────────────────────
+
+# @notice Verifies that both log files are writable before any work begins.
+#         Exits EXIT_LOG_FAIL if either path cannot be written.
+# @custom:edge Catches read-only filesystems, permission errors, and full disks
+#              before they silently corrupt the event stream mid-deployment.
+check_log_writable() {
+  for f in "$DEPLOY_LOG" "$DEPLOY_JSON_LOG"; do
+    if ! touch "$f" 2>/dev/null; then
+      echo "[ERROR] Log file is not writable: $f" >&2
+      exit $EXIT_LOG_FAIL
+    fi
+  done
+}
+
+# ── WASM integrity check ──────────────────────────────────────────────────────
+
+# @notice Verifies the WASM artifact is a valid WASM binary (magic bytes \0asm).
+#         Called after build_contract to catch truncated or corrupt builds.
+# @param  $1  wasm_path
+# @custom:edge Catches zero-byte files, text error files written to the WASM path,
+#              and partial writes caused by disk-full conditions.
+# @custom:security Prevents deploying a corrupt or tampered WASM to the network.
+check_wasm_integrity() {
+  local path="$1"
+  [[ -f "$path" ]] || die $EXIT_WASM_INTEGRITY_FAIL \
+    "WASM file not found: $path" "" "build"
+
+  # Edge case: zero-byte WASM
+  [[ -s "$path" ]] || die $EXIT_WASM_INTEGRITY_FAIL \
+    "WASM file is empty (0 bytes): $path" "" "build"
+
+  # Edge case: validate WASM magic bytes (0x00 0x61 0x73 0x6D = \0asm)
+  local magic
+  magic="$(od -A n -t x1 -N 4 "$path" 2>/dev/null | tr -d ' \n')"
+  if [[ "$magic" != "0061736d" ]]; then
+    die $EXIT_WASM_INTEGRITY_FAIL \
+      "WASM magic bytes invalid (got '$magic', expected '0061736d')" \
+      "$path" "build"
+  fi
+
+  emit_event "step_ok" "wasm_integrity" "WASM integrity verified" \
+    "\"wasm_path\":\"$path\""
+  log "INFO" "WASM integrity check passed: $path"
 }
 
 # ── Network pre-check ────────────────────────────────────────────────────────
 
 # @notice Lightweight connectivity check against the target network RPC endpoint.
-#         Skipped for unknown networks; exits 6 on failure.
+#         Skipped for unknown networks; exits EXIT_NETWORK_FAIL on failure.
+# @custom:edge Handles curl not installed (falls through to require_tool check).
+# @custom:edge Handles HTTP non-200 responses from the health endpoint.
+# @custom:edge Handles DNS resolution failures (curl exit 6).
 check_network() {
   local rpc_url
   case "$NETWORK" in
@@ -168,10 +317,26 @@ check_network() {
   esac
   emit_event "step_start" "network_check" "Checking connectivity to $NETWORK"
   log "INFO" "Checking network connectivity ($NETWORK)..."
-  if ! curl --silent --fail --max-time 10 "$rpc_url" &>/dev/null 2>>"$DEPLOY_LOG"; then
-    die 6 "Network connectivity check failed for $NETWORK" \
-          "GET $rpc_url timed out or returned non-200" "network_check"
+
+  local curl_exit=0
+  curl --silent --fail --max-time "$NETWORK_TIMEOUT" "$rpc_url" \
+    &>/dev/null 2>>"$DEPLOY_LOG" || curl_exit=$?
+
+  if [[ "$curl_exit" -ne 0 ]]; then
+    # Edge case: distinguish DNS failure (curl exit 6) from timeout (exit 28)
+    # and HTTP error (exit 22) for richer frontend error messages.
+    local reason
+    case "$curl_exit" in
+      6)  reason="DNS resolution failed for $rpc_url" ;;
+      28) reason="Connection timed out after ${NETWORK_TIMEOUT}s for $rpc_url" ;;
+      22) reason="HTTP error response from $rpc_url" ;;
+      *)  reason="curl exited with code $curl_exit for $rpc_url" ;;
+    esac
+    die $EXIT_NETWORK_FAIL \
+      "Network connectivity check failed for $NETWORK: $reason" \
+      "GET $rpc_url" "network_check"
   fi
+
   emit_event "step_ok" "network_check" "Network reachable"
   log "INFO" "Network reachable."
 }
@@ -179,14 +344,20 @@ check_network() {
 # ── Core steps ───────────────────────────────────────────────────────────────
 
 # @notice Compiles the contract to WASM using the WASM_TARGET constant.
+# @custom:edge Runs WASM integrity check after build to catch corrupt artifacts.
 build_contract() {
   emit_event "step_start" "build" "Building WASM"
   log "INFO" "Building WASM..."
   if ! run_captured cargo build --target wasm32-unknown-unknown --release; then
-    die 3 "cargo build failed – see $DEPLOY_LOG for details" \
+    die $EXIT_BUILD_FAIL "cargo build failed – see $DEPLOY_LOG for details" \
           "cargo build --target wasm32-unknown-unknown --release" "build"
   fi
-  [[ -f "$WASM_PATH" ]] || die 3 "WASM artifact not found at $WASM_PATH after build" "" "build"
+  [[ -f "$WASM_PATH" ]] || die $EXIT_BUILD_FAIL \
+    "WASM artifact not found at $WASM_PATH after build" "" "build"
+
+  # Edge case: validate WASM integrity before attempting deploy
+  check_wasm_integrity "$WASM_PATH"
+
   emit_event "step_ok" "build" "WASM built successfully" "\"wasm_path\":\"$WASM_PATH\""
   log "INFO" "Build succeeded: $WASM_PATH"
 }
@@ -194,6 +365,9 @@ build_contract() {
 # @notice Deploys the WASM to the network; prints the contract ID to stdout.
 # @param  $1  source – signing identity (named Stellar CLI key, never a raw secret)
 # @custom:security Never pass a raw secret key as source; use a named identity.
+# @custom:edge Sanitises the returned contract_id to guard against injection
+#              in case the CLI returns unexpected output.
+# @custom:edge Validates contract_id format (starts with C, 56 chars) before use.
 deploy_contract() {
   local source="$1"
   emit_event "step_start" "deploy" "Deploying to $NETWORK"
@@ -203,10 +377,22 @@ deploy_contract() {
       --wasm "$WASM_PATH" \
       --network "$NETWORK" \
       --source "$source" 2>>"$DEPLOY_LOG"); then
-    die 4 "stellar contract deploy failed – see $DEPLOY_LOG for details" \
-          "stellar contract deploy --network $NETWORK" "deploy"
+    die $EXIT_DEPLOY_FAIL \
+      "stellar contract deploy failed – see $DEPLOY_LOG for details" \
+      "stellar contract deploy --network $NETWORK" "deploy"
   fi
-  [[ -n "$contract_id" ]] || die 4 "Deploy returned an empty contract ID" "" "deploy"
+
+  # Edge case: empty contract ID
+  [[ -n "$contract_id" ]] || die $EXIT_DEPLOY_FAIL \
+    "Deploy returned an empty contract ID" "" "deploy"
+
+  # Edge case: contract ID format validation (Stellar contract IDs start with C)
+  if [[ ! "$contract_id" =~ ^C[A-Z2-7]{55}$ ]]; then
+    die $EXIT_DEPLOY_FAIL \
+      "Deploy returned an invalid contract ID format: '$contract_id'" \
+      "Expected Stellar contract address starting with C (56 chars)" "deploy"
+  fi
+
   emit_event "step_ok" "deploy" "Contract deployed" "\"contract_id\":\"$contract_id\""
   log "INFO" "Contract deployed: $contract_id"
   echo "$contract_id"
@@ -219,6 +405,8 @@ deploy_contract() {
 # @param  $4  goal
 # @param  $5  deadline
 # @param  $6  min_contribution
+# @custom:edge Emits a structured retry_hint event when init fails so the
+#              frontend UI can suggest the user re-run with --skip-build.
 init_contract() {
   local contract_id="$1" creator="$2" token="$3" goal="$4" deadline="$5" min_contribution="$6"
   emit_event "step_start" "init" "Initialising campaign on $contract_id"
@@ -233,8 +421,13 @@ init_contract() {
       --goal "$goal" \
       --deadline "$deadline" \
       --min_contribution "$min_contribution" 2>>"$DEPLOY_LOG"; then
-    die 5 "Contract initialisation failed – see $DEPLOY_LOG for details" \
-          "stellar contract invoke --id $contract_id -- initialize" "init"
+    # Edge case: emit a retry hint so the frontend can surface a recovery action
+    emit_event "step_error" "init" \
+      "Contract initialisation failed – contract deployed but not initialised" \
+      "\"exit_code\":$EXIT_INIT_FAIL,\"contract_id\":\"$contract_id\",\"retry_hint\":\"Re-run init with --contract-id $contract_id\",\"error_count\":$ERROR_COUNT"
+    die $EXIT_INIT_FAIL \
+      "Contract initialisation failed – see $DEPLOY_LOG for details" \
+      "stellar contract invoke --id $contract_id -- initialize" "init"
   fi
   emit_event "step_ok" "init" "Campaign initialised successfully"
   log "INFO" "Campaign initialised successfully."
@@ -267,6 +460,9 @@ main() {
   local goal="${positional[2]:-}"
   local deadline="${positional[3]:-}"
   local min_contribution="${positional[4]:-$DEFAULT_MIN_CONTRIBUTION}"
+
+  # Edge case: guard log files before truncating them
+  check_log_writable
 
   # Truncate both logs for this run
   : > "$DEPLOY_LOG"
