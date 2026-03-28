@@ -1,286 +1,259 @@
-# frontend_global_error — Global Error Boundary Component
+# Frontend Global Error Boundary
 
-Technical reference for the React global error boundary component built for the Stellar Raise frontend application.
+Technical reference for the React global error boundary built for the Stellar Raise frontend.
 
 ---
 
 ## Overview
 
-The `GlobalErrorBoundary` component provides comprehensive error handling for React applications, with special focus on smart contract and blockchain-related errors. It prevents application crashes by catching JavaScript errors anywhere in the component tree and displaying user-friendly fallback UI.
+`FrontendGlobalErrorBoundary` is a React class component that catches synchronous render-phase errors anywhere in its wrapped component tree. It prevents full application crashes, classifies errors as generic or smart-contract related, emits structured and rate-limited log entries, and renders an appropriate fallback UI with a recovery path.
 
 ```
-Error Occurs → Boundary Catches → Fallback UI → User Recovery Options
+Error thrown → getDerivedStateFromError (state) →
+componentDidCatch → sanitizeErrorMessage → boundaryRateLimiter.isAllowed()
+  → console.error (structured) → onLog callback → onError callback
+  → fallback UI
 ```
 
 ---
 
 ## Component API
 
-### `GlobalErrorBoundary`
-
 ```tsx
-interface Props {
-  children: ReactNode;
-  fallback?: ReactNode;
+import {
+  FrontendGlobalErrorBoundary,
+  ContractError,
+  NetworkError,
+  TransactionError,
+  boundaryRateLimiter,
+  sanitizeErrorMessage,
+} from '../components/frontend_global_error';
+```
+
+### Props
+
+| Prop | Type | Required | Description |
+|------|------|----------|-------------|
+| `children` | `ReactNode` | No | Component tree to protect |
+| `fallback` | `ReactNode` | No | Custom fallback UI; overrides built-in fallback entirely |
+| `onError` | `(report: ErrorReport) => void` | No | Callback invoked with a sanitised error report on every caught error |
+| `onLog` | `(entry: BoundaryLogEntry) => void` | No | Callback invoked with the full structured log entry (new) |
+
+### ErrorReport shape
+
+```ts
+interface ErrorReport {
+  message: string;
+  stack: string | undefined;        // omitted in production
+  componentStack: string | undefined; // omitted in production
+  timestamp: string;                // ISO 8601
+  isSmartContractError: boolean;
+  errorName: string;
 }
 ```
 
-A React error boundary class component that implements `componentDidCatch` and `getDerivedStateFromError`.
+### BoundaryLogEntry shape
 
-- `children` — The component tree to protect with error boundary
-- `fallback` — Optional custom fallback UI component to render on error
-
----
-
-## Error Types
-
-### Custom Error Classes
-
-The component exports custom error classes for better error categorization:
-
-```tsx
-class ContractError extends Error {
-  // Smart contract execution errors
-}
-
-class NetworkError extends Error {
-  // Network connectivity issues
-}
-
-class TransactionError extends Error {
-  // Blockchain transaction failures
-}
-```
-
----
-
-## Error Detection
-
-### Smart Contract Error Recognition
-
-The boundary automatically detects smart contract related errors by:
-
-1. **Message Pattern Matching**: Keywords like "contract", "stellar", "soroban", "transaction", "blockchain"
-2. **Error Type Checking**: Instance checks for custom error classes
-3. **Context Analysis**: Error names and stack traces
-
-### Error Classification Logic
-
-```tsx
-private static isSmartContractError(error: Error): boolean {
-  // Pattern matching and type checking logic
+```ts
+interface BoundaryLogEntry {
+  timestamp: string;           // ISO 8601
+  level: LogLevel;             // always 'error' for caught errors
+  message: string;             // human-readable classification message
+  errorMessage: string;        // sanitised error message (secrets redacted)
+  errorName: string;           // e.g. 'ContractError', 'Error'
+  isSmartContractError: boolean;
+  componentStack?: string;     // omitted in production
+  stack?: string;              // omitted in production
+  sequence: number;            // monotonically increasing per boundary instance
 }
 ```
 
 ---
 
-## Error Handling Flow
+## Custom Error Classes
 
-1. **Error Occurrence**: JavaScript error thrown in component tree
-2. **State Update**: `getDerivedStateFromError` updates component state
-3. **Error Logging**: `componentDidCatch` logs error details
-4. **Fallback Rendering**: Error UI displayed instead of crashed component
-5. **Recovery Options**: User can retry or navigate away
+Use these to signal specific failure domains to the boundary:
+
+```tsx
+// Smart contract execution failure
+throw new ContractError('Insufficient funds for transaction');
+
+// Network / Horizon API failure
+throw new NetworkError('Horizon endpoint unreachable');
+
+// Transaction signing / submission failure
+throw new TransactionError('User rejected transaction in wallet');
+```
+
+All three extend `Error` and are automatically classified as smart-contract errors by the boundary.
 
 ---
 
-## User Experience Features
+## Logging Infrastructure
 
-### Smart Contract Error UI
+### Sanitisation
 
-When a smart contract error is detected:
-- 🔗 Icon indicating blockchain-related issue
-- "Smart Contract Error" title
-- User-friendly explanation of potential causes
-- Specific recovery suggestions
+`sanitizeErrorMessage(message)` strips potentially sensitive data before any log entry is emitted:
 
-### Generic Error UI
+- Long hex strings (potential private keys / hashes)
+- Stellar account IDs (`G` + 55 base-32 chars)
+- Base64 blobs (XDR payloads, JWT tokens)
+- `secret_key: <value>` and `private_key: <value>` patterns
+
+Matched substrings are replaced with `[REDACTED]`.
+
+### Rate Limiting
+
+`boundaryRateLimiter` is a module-level singleton that allows at most **10 log entries per 60-second sliding window**. When the limit is exceeded:
+
+- `console.warn` emits a suppression notice with the current sequence number.
+- `onLog` and `onError` callbacks are **not** invoked.
+- The fallback UI is still rendered normally.
+
+You can reset the limiter in tests:
+
+```ts
+import { boundaryRateLimiter } from '../components/frontend_global_error';
+beforeEach(() => boundaryRateLimiter.reset());
+```
 
 For other errors:
 - ⚠️ Warning icon
-- "Something went wrong" title
+- "Documentation Loading Error" title
 - General error message
 - Standard recovery options
 
-### Recovery Options
+`buildBoundaryLogEntry` produces a plain serialisable object safe to forward to any log aggregator:
 
 - **Try Again**: Resets error state and re-renders children
 - **Go Home**: Navigates to home page
+- **Dismiss**: Resets error state without resolving the underlying issue — use only for transient errors
 - **Error Details**: Expandable section in development mode
 
 ---
 
-## Development vs Production
+## Error Classification
 
-### Development Mode
-- Detailed error information displayed
-- Full error stack traces
-- Component stack traces
-- Enhanced debugging information
+The boundary classifies an error as a smart-contract error when:
 
-### Production Mode
-- Clean, user-friendly error messages
-- Error details hidden from users
-- Errors logged to external services
-- Minimal technical information exposed
+1. It is an instance of `ContractError`, `NetworkError`, or `TransactionError`.
+2. Its `name` or `message` contains any of these keywords (case-insensitive):
+   `contract`, `stellar`, `soroban`, `transaction`, `blockchain`, `ledger`,
+   `horizon`, `xdr`, `invoke`, `wallet`.
+
+All other errors render the generic "Documentation Loading Error" fallback.
 
 ---
 
-## Error Reporting
+## Fallback UIs
 
-### Automatic Error Reporting
+### Generic fallback
+- ⚠️ icon
+- Title: "Documentation Loading Error"
+- "Try Again" and "Go Home" buttons
 
-```tsx
-private reportError(error: Error, errorInfo: ErrorInfo) {
-  const errorReport = {
-    message: error.message,
-    stack: error.stack,
-    componentStack: errorInfo.componentStack,
-    timestamp: new Date().toISOString(),
-    userAgent: navigator.userAgent,
-    url: window.location.href,
-    isSmartContractError: this.state.isSmartContractError,
-  };
+### Smart contract fallback
+- 🔗 icon
+- Title: "Smart Contract Error"
+- Blockchain-specific guidance (wallet balance, connectivity)
+- "Try Again" and "Go Home" buttons
 
-  // Send to error reporting service (Sentry, LogRocket, etc.)
-}
-```
-
-### Integration Points
-
-Ready for integration with:
-- **Sentry**: `Sentry.captureException(error, { contexts: { react: errorInfo } })`
-- **LogRocket**: `LogRocket.captureException(error, { extra: errorInfo })`
-- **Custom Analytics**: Send to internal error tracking systems
+### Dev-only error details
+In `NODE_ENV !== 'production'`, a collapsible `<details>` element shows the raw error message to aid debugging. This section is hidden in production to prevent information disclosure.
 
 ---
 
-## Usage Examples
+## Usage
 
-### Basic Usage
+### Basic
 
 ```tsx
-import GlobalErrorBoundary from '../components/frontend_global_error';
+import { FrontendGlobalErrorBoundary } from '../components/frontend_global_error';
 
 function App() {
   return (
-    <GlobalErrorBoundary>
+    <FrontendGlobalErrorBoundary>
       <MainApplication />
-    </GlobalErrorBoundary>
+    </FrontendGlobalErrorBoundary>
   );
 }
 ```
 
-### With Custom Fallback
+### With structured logging (Datadog / CloudWatch)
 
 ```tsx
-import GlobalErrorBoundary from '../components/frontend_global_error';
-
-const CustomErrorUI = () => (
-  <div>
-    <h1>Oops! Something broke</h1>
-    <button onClick={() => window.location.reload()}>
-      Reload Page
-    </button>
-  </div>
-);
-
-function App() {
-  return (
-    <GlobalErrorBoundary fallback={<CustomErrorUI />}>
-      <MainApplication />
-    </GlobalErrorBoundary>
-  );
-}
+<FrontendGlobalErrorBoundary
+  onLog={(entry) => myLogAggregator.send(entry)}
+  onError={(report) => Sentry.captureMessage(report.message, { extra: report })}
+>
+  <MainApplication />
+</FrontendGlobalErrorBoundary>
 ```
 
-### Error Throwing in Components
+### Throwing typed errors in contract components
 
 ```tsx
-import { ContractError, NetworkError } from '../components/frontend_global_error';
+import { ContractError } from '../components/frontend_global_error';
 
-// In a smart contract interaction component
-try {
-  await contract.call();
-} catch (error) {
-  if (error.message.includes('insufficient funds')) {
-    throw new ContractError('Insufficient funds for transaction');
+async function contribute(amount: number) {
+  try {
+    await contract.invoke('contribute', { amount });
+  } catch (err) {
+    throw new ContractError(`Contribution failed: ${(err as Error).message}`);
   }
-  throw error;
 }
 ```
-
----
-
-## Testing Coverage
-
-### Test Categories
-
-- ✅ **Normal Operation**: Renders children when no errors
-- ✅ **Error Catching**: Handles React errors gracefully
-- ✅ **Smart Contract Errors**: Special handling for blockchain errors
-- ✅ **Recovery**: Retry functionality works correctly
-- ✅ **Custom Fallbacks**: Respects custom error UI
-- ✅ **Development Mode**: Shows error details in dev
-- ✅ **Error Classification**: Correctly identifies error types
-- ✅ **Accessibility**: Error UI is keyboard accessible
-
-### Test Coverage Metrics
-
-- **Statements**: 95%+
-- **Branches**: 90%+
-- **Functions**: 100%
-- **Lines**: 95%+
 
 ---
 
 ## Security Considerations
 
-### Information Disclosure
-
-- **Production Safety**: Error details hidden from users in production
-- **Development Debugging**: Full error info available in development
-- **Logging Security**: Sensitive data not included in error reports
-
-### Error Boundary Limitations
-
-- **Async Errors**: Cannot catch errors in event handlers, async code, or server-side rendering
-- **Nested Boundaries**: Multiple boundaries can be nested for granular error handling
-- **Error Recovery**: Not all errors are recoverable; some require page reload
-
-### Smart Contract Error Handling
-
-- **User-Friendly Messages**: Technical errors translated to user-understandable language
-- **Actionable Guidance**: Clear instructions for resolving common issues
-- **Security Boundaries**: Prevents sensitive contract data exposure
+| Concern | Mitigation |
+|---------|-----------|
+| Information disclosure | Stack traces and component stacks are omitted from `ErrorReport` and `BoundaryLogEntry` in production |
+| Secret leakage in logs | `sanitizeErrorMessage` redacts hex keys, Stellar IDs, base64 blobs, and key patterns before logging |
+| Log flooding | `boundaryRateLimiter` caps entries at 10 per 60 s; excess entries emit a single warning |
+| XSS via error messages | Fallback UI renders error message as React text node (not `innerHTML`) |
+| Sensitive contract data | Custom error classes should never embed private keys, XDR, or account secrets in the message |
+| Async errors | The boundary does NOT catch errors in event handlers, `setTimeout`, or SSR — handle those separately |
 
 ---
 
-## Performance Impact
+## Limitations
 
-### Bundle Size
-- **Minimal Overhead**: ~2KB gzipped
-- **Tree Shaking**: Unused error classes can be tree-shaken
-- **Conditional Rendering**: Error UI only rendered when needed
-
-### Runtime Performance
-- **Zero Cost**: No performance impact when no errors occur
-- **Efficient Error Detection**: Fast pattern matching for error classification
-- **Memory Management**: Error state properly cleaned up on recovery
+- Cannot catch errors thrown inside the boundary's own `render` method.
+- Does not catch async errors (event handlers, `Promise` rejections, `setTimeout`).
+- Does not catch server-side rendering errors (use Next.js `_error.tsx` / `500.tsx` for those).
+- Nested boundaries can be used for more granular isolation of subsections.
 
 ---
 
-## Browser Compatibility
+## Test Coverage
 
-- **Modern Browsers**: Full support for React 16.8+ error boundaries
-- **Legacy Browsers**: Graceful degradation (error boundaries not supported)
-- **Mobile Browsers**: Optimized touch interactions for error recovery
+Tests live in `frontend/components/frontend_global_error.test.tsx` and cover:
+
+- Custom error class instantiation and inheritance
+- `sanitizeErrorMessage` — all redaction patterns and edge cases
+- `isSmartContractError` — all keyword and type variants
+- `BoundaryRateLimiter` — allow, block, and reset behaviour
+- `buildBoundaryLogEntry` — shape, sanitisation, and dev/prod stack inclusion
+- `buildErrorReport` — shape and field correctness
+- Normal (no-error) rendering
+- Generic error fallback rendering and logging
+- Smart contract error detection (10 keyword/type variants)
+- Custom fallback prop (generic and contract errors)
+- Recovery via "Try Again" (success and persistent-error cases)
+- `onError` callback with structured report validation
+- `onLog` callback with `BoundaryLogEntry` validation
+- Rate limiting — suppression, callback blocking, and post-reset recovery
+- Accessibility (`role="alert"`, `aria-live`, `aria-label`, `aria-hidden`)
+- Edge cases: empty message, TypeError, keyword matching
+
+Target: ≥ 95% statement and line coverage, 100% function coverage.
 
 ---
 
 ## Integration with Next.js
-
-### _app.tsx Integration
 
 ```tsx
 // pages/_app.tsx
@@ -293,27 +266,6 @@ function MyApp({ Component, pageProps }) {
     </GlobalErrorBoundary>
   );
 }
-
-export default MyApp;
 ```
 
-### Custom 500 Page
-
-The boundary complements Next.js custom error pages by handling client-side errors while 500.tsx handles server-side errors.
-
----
-
-## Future Enhancements
-
-### Planned Features
-
-- **Error Analytics**: Integration with error tracking dashboards
-- **User Feedback**: Allow users to report additional error context
-- **Error Recovery Strategies**: Automatic retry with exponential backoff
-- **Offline Support**: Special handling for network connectivity issues
-
-### Extensibility
-
-- **Plugin System**: Allow custom error handlers and classifiers
-- **Error Context**: Additional metadata collection for better debugging
-- **Recovery Actions**: Configurable recovery strategies per error type
+The boundary handles client-side render errors. `pages/500.tsx` handles server-side errors. Both should be present for full coverage.

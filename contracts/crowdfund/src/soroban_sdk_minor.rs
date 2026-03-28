@@ -1,32 +1,43 @@
 //! Soroban SDK minor-bump helpers for frontend UI and scalability.
 //!
 //! This module centralizes low-level helpers used when reviewing/operating a
-//! minor Soroban SDK bump so behavior is explicit, testable, and audit-friendly.
-
-#[allow(dead_code)]
+//! minor Soroban SDK bump so behaviour is explicit, testable, and audit-friendly.
+//!
+//! ## Security Assumptions
+//! 1. All version-comparison helpers are read-only — no state mutations.
+//! 2. Empty version strings return `Incompatible` rather than silently mapping
+//!    to major-0, preventing a misconfigured UI call from being treated as a
+//!    valid same-major upgrade.
+//! 3. `validate_wasm_hash` rejects a zeroed hash to prevent accidental contract
+//!    bricking during an upgrade.
+//! 4. `clamp_page_size` bounds frontend scan size to prevent indexer overload.
+//! 5. `emit_upgrade_audit_event_with_note` panics on oversized notes to keep
+//!    the event schema predictable and indexer-friendly.
+//! 6. `emit_ping_event` requires the emitter to authorize the call, enforcing
+//!    the Soroban v22 auth pattern for all state-touching operations.
 
 use soroban_sdk::{contracttype, Address, BytesN, Env, String, Symbol};
 
 // ── Version metadata ─────────────────────────────────────────────────────────
 
-/// The Soroban SDK version this module was written against.
+/// @notice The Soroban SDK version this module was written against.
 pub const SDK_VERSION_BASELINE: &str = "22.0.0";
 
-/// The target minor-bump version being reviewed.
+/// @notice The target minor-bump version being reviewed.
 pub const SDK_VERSION_TARGET: &str = "22.x";
 
-/// Maximum number of records returned in a single frontend page.
+/// @notice Maximum number of records returned in a single frontend page.
 pub const FRONTEND_PAGE_SIZE_MAX: u32 = 100;
 
-/// Minimum number of records returned in a single frontend page.
+/// @notice Minimum number of records returned in a single frontend page.
 pub const FRONTEND_PAGE_SIZE_MIN: u32 = 1;
 
-/// Max event-note payload accepted for upgrade audit logs.
+/// @notice Max event-note payload accepted for upgrade audit logs (bytes).
 pub const UPGRADE_NOTE_MAX_LEN: u32 = 256;
 
-// ── Compatibility helpers ─────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────────────────
 
-/// Represents the result of a compatibility check between two SDK versions.
+/// @notice Result of a compatibility check between two SDK versions.
 #[derive(Clone, PartialEq, Debug)]
 #[contracttype]
 pub enum CompatibilityStatus {
@@ -38,11 +49,12 @@ pub enum CompatibilityStatus {
     Incompatible,
 }
 
-/// Metadata describing a single SDK change relevant to this contract.
+/// @notice Metadata describing a single SDK change relevant to this contract.
+/// @dev    Stored on-chain for auditability; emitted as part of upgrade events.
 #[derive(Clone)]
 #[contracttype]
 pub struct SdkChangeRecord {
-    /// Short identifier for the change (e.g. "extend_ttl_signature").
+    /// Short identifier for the change (e.g. `"extend_ttl_signature"`).
     pub id: Symbol,
     /// Whether the change is breaking for this contract.
     pub is_breaking: bool,
@@ -50,7 +62,7 @@ pub struct SdkChangeRecord {
     pub description: String,
 }
 
-/// Frontend pagination window computed from `offset` and `requested`.
+/// @notice Frontend pagination window computed from `offset` and `requested`.
 #[derive(Clone, PartialEq, Debug)]
 #[contracttype]
 pub struct PaginationWindow {
@@ -58,33 +70,25 @@ pub struct PaginationWindow {
     pub limit: u32,
 }
 
-/// Assesses whether upgrading from `from_version` to `to_version` is safe
-/// for this contract's storage layout and ABI.
+// ── Compatibility helpers ─────────────────────────────────────────────────────
+
+/// @notice Assesses whether upgrading from `from_version` to `to_version` is
+///         safe for this contract's storage layout and ABI.
 ///
-/// # Arguments
-/// * `env`          – The Soroban environment.
-/// * `from_version` – Baseline SDK version string (e.g. `"22.0.0"`).
-/// * `to_version`   – Target SDK version string (e.g. `"22.1.0"`).
+/// @dev Returns:
+///   - `Compatible`          — same major version (safe minor/patch bump).
+///   - `RequiresMigration`   — different major versions.
+///   - `Incompatible`        — either version string is empty (malformed input
+///                             that the frontend should surface as an error).
 ///
-/// # Returns
-/// - [`CompatibilityStatus::Compatible`] — same major version (safe minor/patch bump).
-/// - [`CompatibilityStatus::RequiresMigration`] — different major versions.
-/// - [`CompatibilityStatus::Incompatible`] — either version string is empty or
-///   completely unparseable (no dot separator at all), signalling a malformed
-///   input that the frontend should surface as an error rather than silently
-///   treating as major-0.
-///
-/// # Security
-/// This function is **read-only** and performs no state mutations.
+/// @security Read-only; no state mutations.
 pub fn assess_compatibility(
     env: &Env,
     from_version: &str,
     to_version: &str,
 ) -> CompatibilityStatus {
-    let _ = env; // read-only; suppress unused warning in no_std context
+    let _ = env;
 
-    // Edge case: empty strings are treated as incompatible rather than
-    // silently mapping to major-0, which could mask a misconfigured UI call.
     if from_version.is_empty() || to_version.is_empty() {
         return CompatibilityStatus::Incompatible;
     }
@@ -99,9 +103,8 @@ pub fn assess_compatibility(
     CompatibilityStatus::Compatible
 }
 
-/// Parses the major version component from a semver string like `"22.0.0"`.
-///
-/// Returns `0` if the string cannot be parsed (e.g. `"invalid"`).
+/// @dev Parses the major version component from a semver string like `"22.0.0"`.
+///      Returns `0` if the string cannot be parsed.
 fn parse_major(version: &str) -> u32 {
     version
         .split('.')
@@ -110,18 +113,15 @@ fn parse_major(version: &str) -> u32 {
         .unwrap_or(0)
 }
 
-/// Parses the minor version component from a semver string like `"22.3.0"`.
+/// @notice Parses the minor version component from a semver string like `"22.3.0"`.
 ///
-/// Returns `0` if the string has fewer than two dot-separated components or
-/// the minor component cannot be parsed as a `u32`.
-///
-/// # Edge cases
-/// - `"22"` → `0` (no minor component present)
-/// - `"22."` → `0` (empty minor component)
-/// - `"22.x.0"` → `0` (non-numeric minor)
+/// @dev Returns `0` for any unparseable or missing minor component:
+///   - `"22"`    → `0` (no minor component)
+///   - `"22."`   → `0` (empty minor)
+///   - `"22.x.0"` → `0` (non-numeric minor)
+///   - `""`      → `0`
 ///
 /// @notice Used by the frontend to display the exact minor bump being reviewed.
-/// @dev    Pure function; no state access.
 pub fn parse_minor(version: &str) -> u32 {
     version
         .split('.')
@@ -130,14 +130,11 @@ pub fn parse_minor(version: &str) -> u32 {
         .unwrap_or(0)
 }
 
-/// Returns `true` when `to_version` is a forward minor bump of `from_version`
-/// within the same major series (i.e. same major, `to_minor > from_minor`).
+/// @notice Returns `true` when `to_version` is a forward minor bump of
+///         `from_version` within the same major series.
 ///
-/// # Security
-/// Read-only; no state mutations.
-///
-/// @notice Lets the frontend distinguish a minor bump from a same-version
-///         no-op or a patch-only change before showing the upgrade banner.
+/// @dev Same major, `to_minor > from_minor` → `true`. All other cases → `false`.
+/// @security Pure function; no state access.
 pub fn is_minor_bump(from_version: &str, to_version: &str) -> bool {
     let from_major = parse_major(from_version);
     let to_major = parse_major(to_version);
@@ -147,58 +144,81 @@ pub fn is_minor_bump(from_version: &str, to_version: &str) -> bool {
     parse_minor(to_version) > parse_minor(from_version)
 }
 
-/// @notice Clamp frontend page size into bounded range.
-/// @dev Bounds protect indexer/UI from oversized scans after SDK upgrades.
+// ── Frontend pagination ───────────────────────────────────────────────────────
+
+/// @notice Clamp frontend page size into `[FRONTEND_PAGE_SIZE_MIN, FRONTEND_PAGE_SIZE_MAX]`.
+/// @dev    Bounds protect the indexer/UI from oversized scans after SDK upgrades.
 pub fn clamp_page_size(requested: u32) -> u32 {
     requested.clamp(FRONTEND_PAGE_SIZE_MIN, FRONTEND_PAGE_SIZE_MAX)
 }
 
-/// @notice Build a bounded pagination window.
-/// @dev Saturating arithmetic avoids overflow when `offset` is near `u32::MAX`.
-///      `offset.saturating_add(limit)` is used internally by callers to compute
-///      the exclusive end index without wrapping.
+/// @notice Build a bounded pagination window from `offset` and `requested_limit`.
+/// @dev    Saturating arithmetic prevents `u32` overflow when `offset` is near
+///         `u32::MAX`. `offset.saturating_add(limit)` is used internally by
+///         callers to compute the exclusive end index without wrapping.
 pub fn pagination_window(offset: u32, requested_limit: u32) -> PaginationWindow {
     let limit = clamp_page_size(requested_limit);
-    // Saturating add: if offset + limit would overflow u32, cap at u32::MAX.
-    // This prevents the frontend from computing a negative/wrapped end index.
-    let _end = offset.saturating_add(limit); // exposed for callers; stored for clarity
+    let _end = offset.saturating_add(limit);
     PaginationWindow { start: offset, limit }
 }
 
-/// @notice Validate optional SDK-upgrade note used for UI/audit display.
-/// @dev Length bound keeps event payloads compact and indexer-friendly.
+// ── Upgrade note validation ───────────────────────────────────────────────────
+
+/// @notice Returns `true` when the note fits within `UPGRADE_NOTE_MAX_LEN` bytes.
+/// @dev    Exact boundary (`len == max`) is accepted.
 pub fn validate_upgrade_note(note: &String) -> bool {
     note.len() <= UPGRADE_NOTE_MAX_LEN
 }
 
-/// Validates that a WASM hash is non-zero before an upgrade is applied.
+// ── WASM hash validation ──────────────────────────────────────────────────────
+
+/// @notice Returns `true` for any non-zero 32-byte WASM hash.
 ///
-/// A zero hash indicates an uninitialised value and must be rejected to
-/// prevent accidental contract bricking.
+/// @dev A zero hash indicates an uninitialised value and must be rejected to
+///      prevent accidental contract bricking during an upgrade.
 ///
-/// # Arguments
-/// * `wasm_hash` – The 32-byte WASM hash to validate.
-///
-/// # Returns
-/// `true` if the hash is valid (non-zero), `false` otherwise.
-///
-/// # Security
-/// Prevents upgrade calls with a zeroed hash, which would destroy the
-/// contract's executable code.
+/// @security Prevents upgrade calls with a zeroed hash, which would destroy
+///           the contract's executable code.
 pub fn validate_wasm_hash(wasm_hash: &BytesN<32>) -> bool {
     wasm_hash.to_array() != [0u8; 32]
 }
 
-/// Emits a structured SDK-upgrade audit event on the Soroban event ledger.
+// ── SdkChangeRecord builder ───────────────────────────────────────────────────
+
+/// @notice Constructs a new `SdkChangeRecord` for on-chain audit storage.
 ///
-/// This provides an immutable, on-chain record that an upgrade was reviewed
-/// and approved, which is useful for governance and security audits.
+/// @param env         The Soroban environment.
+/// @param id          Short identifier string (max 32 chars for Symbol).
+/// @param is_breaking Whether this change is breaking for the contract.
+/// @param description Human-readable description (should fit within
+///                    `UPGRADE_NOTE_MAX_LEN` for indexer compatibility).
 ///
-/// # Arguments
-/// * `env`          – The Soroban environment.
-/// * `from_version` – The previous SDK version string.
-/// * `to_version`   – The new SDK version string.
-/// * `reviewer`     – The address that approved the upgrade.
+/// @dev The `id` is stored as a `Symbol::new` so it is compact and
+///      gas-efficient. The `description` is a full `String` for readability.
+pub fn build_sdk_change_record(
+    env: &Env,
+    id: &str,
+    is_breaking: bool,
+    description: String,
+) -> SdkChangeRecord {
+    SdkChangeRecord {
+        id: Symbol::new(env, id),
+        is_breaking,
+        description,
+    }
+}
+
+// ── Audit event emission ──────────────────────────────────────────────────────
+
+/// @notice Emits a structured SDK-upgrade audit event on the Soroban event ledger.
+///
+/// @dev Provides an immutable, on-chain record that an upgrade was reviewed
+///      and approved, useful for governance and security audits.
+///
+/// @param env          The Soroban environment.
+/// @param from_version The previous SDK version string.
+/// @param to_version   The new SDK version string.
+/// @param reviewer     The address that approved the upgrade.
 pub fn emit_upgrade_audit_event(
     env: &Env,
     from_version: String,
@@ -214,8 +234,16 @@ pub fn emit_upgrade_audit_event(
     );
 }
 
-/// @notice Emit SDK-upgrade review with a bounded note for frontend indexing.
-/// @dev Falls back to panic on oversized note to keep event schema predictable.
+/// @notice Emits an SDK-upgrade audit event with a bounded note.
+///
+/// @dev Panics on oversized note to keep the event schema predictable and
+///      prevent indexer overload from large payloads.
+///
+/// @param env          The Soroban environment.
+/// @param from_version The previous SDK version string.
+/// @param to_version   The new SDK version string.
+/// @param reviewer     The address that approved the upgrade.
+/// @param note         Optional audit note (must be <= UPGRADE_NOTE_MAX_LEN bytes).
 pub fn emit_upgrade_audit_event_with_note(
     env: &Env,
     from_version: String,
@@ -233,4 +261,21 @@ pub fn emit_upgrade_audit_event_with_note(
         ),
         (reviewer, from_version, to_version, note),
     );
+}
+
+/// @notice Emits a small typed `ping` event demonstrating the Soroban v22
+///         event bounds using a typed payload.
+///
+/// @dev The emitter must authorize the call via `require_auth()`, enforcing
+///      the v22 auth pattern for all state-touching operations.
+///
+/// @param env   The Soroban environment.
+/// @param from  The address which emits the event (must authorize).
+/// @param value A small integer payload included in the event.
+///
+/// @security Requires `from.require_auth()` — only the emitter can trigger
+///           this event, preventing spoofed audit trails.
+pub fn emit_ping_event(env: &Env, from: Address, value: i32) {
+    from.require_auth();
+    env.events().publish((Symbol::short("ping"),), value);
 }

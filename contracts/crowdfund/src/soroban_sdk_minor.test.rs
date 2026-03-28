@@ -2,16 +2,20 @@
 //!
 //! Covers: compatibility assessment, minor-bump detection, WASM hash
 //! validation, pagination bounds, upgrade-note validation, audit event
-//! emission, and all new edge cases added for the v22 minor bump.
+//! emission, SdkChangeRecord construction, emit_ping_event auth enforcement,
+//! and all edge cases for the v22 minor bump.
 
 use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String};
 
 use crate::soroban_sdk_minor::{
-    assess_compatibility, clamp_page_size, emit_upgrade_audit_event,
-    emit_upgrade_audit_event_with_note, is_minor_bump, pagination_window, parse_minor,
-    validate_upgrade_note, validate_wasm_hash, CompatibilityStatus, FRONTEND_PAGE_SIZE_MAX,
-    FRONTEND_PAGE_SIZE_MIN, SDK_VERSION_BASELINE, SDK_VERSION_TARGET, UPGRADE_NOTE_MAX_LEN,
+    assess_compatibility, build_sdk_change_record, clamp_page_size, emit_ping_event,
+    emit_upgrade_audit_event, emit_upgrade_audit_event_with_note, is_minor_bump,
+    pagination_window, parse_minor, validate_upgrade_note, validate_wasm_hash,
+    CompatibilityStatus, FRONTEND_PAGE_SIZE_MAX, FRONTEND_PAGE_SIZE_MIN, SDK_VERSION_BASELINE,
+    SDK_VERSION_TARGET, UPGRADE_NOTE_MAX_LEN,
 };
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn make_env() -> Env {
     let env = Env::default();
@@ -19,9 +23,8 @@ fn make_env() -> Env {
     env
 }
 
+/// Build a Soroban String of `len` bytes filled with `byte`.
 fn make_string(env: &Env, len: u32, byte: u8) -> String {
-    // Build a byte slice of the requested length filled with `byte`.
-    // Soroban String::from_bytes accepts a &[u8] slice.
     let bytes = [byte; 512];
     String::from_bytes(env, &bytes[..len as usize])
 }
@@ -106,7 +109,7 @@ fn compatibility_one_malformed_requires_migration() {
     );
 }
 
-/// Edge case: empty `from_version` → Incompatible (not silently major-0).
+/// Empty `from_version` → Incompatible (not silently major-0).
 #[test]
 fn compatibility_empty_from_version_is_incompatible() {
     let env = make_env();
@@ -116,7 +119,7 @@ fn compatibility_empty_from_version_is_incompatible() {
     );
 }
 
-/// Edge case: empty `to_version` → Incompatible.
+/// Empty `to_version` → Incompatible.
 #[test]
 fn compatibility_empty_to_version_is_incompatible() {
     let env = make_env();
@@ -126,7 +129,7 @@ fn compatibility_empty_to_version_is_incompatible() {
     );
 }
 
-/// Edge case: both empty → Incompatible.
+/// Both empty → Incompatible.
 #[test]
 fn compatibility_both_empty_is_incompatible() {
     let env = make_env();
@@ -205,7 +208,7 @@ fn is_minor_bump_downgrade_is_false() {
     assert!(!is_minor_bump("22.2.0", "22.1.0"));
 }
 
-/// Cross-major → not a minor bump (different major series).
+/// Cross-major → not a minor bump.
 #[test]
 fn is_minor_bump_cross_major_is_false() {
     assert!(!is_minor_bump("22.0.0", "23.1.0"));
@@ -279,11 +282,10 @@ fn pagination_window_offset_at_max_does_not_overflow() {
     let window = pagination_window(u32::MAX, 50);
     assert_eq!(window.start, u32::MAX);
     assert_eq!(window.limit, 50);
-    // Verify saturating_add does not wrap: u32::MAX + 50 saturates to u32::MAX.
     assert_eq!(window.start.saturating_add(window.limit), u32::MAX);
 }
 
-/// Edge case: zero requested limit → clamped to FRONTEND_PAGE_SIZE_MIN.
+/// Zero requested limit → clamped to FRONTEND_PAGE_SIZE_MIN.
 #[test]
 fn pagination_window_zero_limit_clamped_to_min() {
     let window = pagination_window(5, 0);
@@ -313,6 +315,41 @@ fn upgrade_note_validation_one_over_boundary_is_invalid() {
     let env = make_env();
     let long = make_string(&env, UPGRADE_NOTE_MAX_LEN + 1, b'a');
     assert!(!validate_upgrade_note(&long));
+}
+
+// ── build_sdk_change_record ───────────────────────────────────────────────────
+
+/// Non-breaking record stores correct fields.
+#[test]
+fn build_sdk_change_record_non_breaking() {
+    let env = make_env();
+    let desc = String::from_str(&env, "register API changed");
+    let record = build_sdk_change_record(&env, "register_api", false, desc.clone());
+    assert!(!record.is_breaking);
+    assert_eq!(record.description, desc);
+}
+
+/// Breaking record stores correct fields.
+#[test]
+fn build_sdk_change_record_breaking() {
+    let env = make_env();
+    let desc = String::from_str(&env, "storage key type changed");
+    let record = build_sdk_change_record(&env, "storage_key", true, desc.clone());
+    assert!(record.is_breaking);
+    assert_eq!(record.description, desc);
+}
+
+/// Two records with different ids are distinct.
+#[test]
+fn build_sdk_change_record_distinct_ids() {
+    let env = make_env();
+    let desc_a = String::from_str(&env, "change A");
+    let desc_b = String::from_str(&env, "change B");
+    let rec_a = build_sdk_change_record(&env, "change_a", false, desc_a);
+    let rec_b = build_sdk_change_record(&env, "change_b", true, desc_b);
+    // Symbols are equal only when the string is the same.
+    assert_ne!(rec_a.id, rec_b.id);
+    assert_ne!(rec_a.is_breaking, rec_b.is_breaking);
 }
 
 // ── emit_upgrade_audit_event ──────────────────────────────────────────────────
@@ -368,6 +405,60 @@ fn emit_audit_event_with_note_exact_boundary_does_not_panic() {
         Address::generate(&env),
         exact,
     );
+}
+
+// ── emit_ping_event ───────────────────────────────────────────────────────────
+
+/// emit_ping_event succeeds when auth is mocked.
+#[test]
+fn emit_ping_event_succeeds_with_mocked_auth() {
+    let env = make_env();
+    let from = Address::generate(&env);
+    // mock_all_auths satisfies require_auth() — no panic expected.
+    emit_ping_event(&env, from, 42_i32);
+}
+
+/// emit_ping_event with value 0 succeeds.
+#[test]
+fn emit_ping_event_zero_value() {
+    let env = make_env();
+    let from = Address::generate(&env);
+    emit_ping_event(&env, from, 0_i32);
+}
+
+/// emit_ping_event with negative value succeeds (i32 is signed).
+#[test]
+fn emit_ping_event_negative_value() {
+    let env = make_env();
+    let from = Address::generate(&env);
+    emit_ping_event(&env, from, -1_i32);
+}
+
+/// emit_ping_event with i32::MAX succeeds.
+#[test]
+fn emit_ping_event_max_value() {
+    let env = make_env();
+    let from = Address::generate(&env);
+    emit_ping_event(&env, from, i32::MAX);
+}
+
+/// emit_ping_event panics without auth (no mock).
+#[test]
+#[should_panic]
+fn emit_ping_event_panics_without_auth() {
+    let env = Env::default(); // no mock_all_auths
+    let from = Address::generate(&env);
+    emit_ping_event(&env, from, 1_i32);
+}
+
+/// Two different callers can each emit independently.
+#[test]
+fn emit_ping_event_multiple_callers() {
+    let env = make_env();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    emit_ping_event(&env, a, 1_i32);
+    emit_ping_event(&env, b, 2_i32);
 }
 
 // ── Integration: safe vs unsafe upgrade paths ─────────────────────────────────
@@ -428,4 +519,41 @@ fn valid_hash_but_empty_version_is_incompatible() {
         CompatibilityStatus::Incompatible
     );
     assert!(validate_wasm_hash(&hash));
+}
+
+/// Full safe-upgrade flow: build record, assess, validate hash, emit event.
+#[test]
+fn full_safe_upgrade_flow() {
+    let env = make_env();
+    let reviewer = Address::generate(&env);
+
+    // 1. Build a change record for the register API change.
+    let record = build_sdk_change_record(
+        &env,
+        "register_api",
+        false,
+        String::from_str(&env, "env.register(Contract, ()) replaces register_contract"),
+    );
+    assert!(!record.is_breaking);
+
+    // 2. Assess compatibility.
+    assert_eq!(
+        assess_compatibility(&env, "22.0.0", "22.1.0"),
+        CompatibilityStatus::Compatible
+    );
+
+    // 3. Validate WASM hash.
+    let mut bytes = [0u8; 32];
+    bytes[0] = 0xDE;
+    let hash = BytesN::from_array(&env, &bytes);
+    assert!(validate_wasm_hash(&hash));
+
+    // 4. Emit audit event with note.
+    emit_upgrade_audit_event_with_note(
+        &env,
+        String::from_str(&env, "22.0.0"),
+        String::from_str(&env, "22.1.0"),
+        reviewer,
+        String::from_str(&env, "all checks passed"),
+    );
 }

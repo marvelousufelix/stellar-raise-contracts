@@ -6,14 +6,133 @@ import {
   NetworkError,
   TransactionError,
   ErrorReport,
+  MAX_RETRIES,
+  MAX_CLASSIFICATION_INPUT_CHARS,
+  MAX_REPORT_MESSAGE_CHARS,
+  MAX_DISPLAY_MESSAGE_CHARS,
+  MAX_ERROR_NAME_CHARS,
+  truncateForBounds,
+  boundedClassificationHaystack,
 } from './frontend_global_error';
 
 const originalConsoleError = console.error;
-beforeAll(() => { console.error = jest.fn(); });
-afterAll(() => { console.error = originalConsoleError; });
-beforeEach(() => { jest.clearAllMocks(); });
+const originalConsoleWarn = console.warn;
+beforeAll(() => {
+  console.error = jest.fn();
+  console.warn = jest.fn();
+});
+afterAll(() => {
+  console.error = originalConsoleError;
+  console.warn = originalConsoleWarn;
+});
+beforeEach(() => {
+  jest.clearAllMocks();
+  boundaryRateLimiter.reset();
+});
 
 const Throw = ({ error }: { error: Error }) => { throw error; };
+
+// ---------------------------------------------------------------------------
+// Logging bounds (pure helpers + script-friendly caps)
+// ---------------------------------------------------------------------------
+
+describe('truncateForBounds', () => {
+  it('returns empty string when maxCodeUnits <= 0', () => {
+    expect(truncateForBounds('hello', 0)).toBe('');
+    expect(truncateForBounds('hello', -1)).toBe('');
+  });
+
+  it('returns original string when within cap', () => {
+    expect(truncateForBounds('hello', 10)).toBe('hello');
+  });
+
+  it('returns single ellipsis when cap is 1', () => {
+    expect(truncateForBounds('hello', 1)).toBe('\u2026');
+  });
+
+  it('truncates with ellipsis when over cap', () => {
+    expect(truncateForBounds('hello', 4)).toBe('hel\u2026');
+  });
+});
+
+describe('boundedClassificationHaystack', () => {
+  it('lowercases name and message', () => {
+    const h = boundedClassificationHaystack(new Error('Stellar'));
+    expect(h).toContain('stellar');
+    expect(h).toContain('error');
+  });
+});
+
+describe('Logging bound constants', () => {
+  it('exports positive numeric caps for maintainability', () => {
+    expect(MAX_CLASSIFICATION_INPUT_CHARS).toBeGreaterThan(1024);
+    expect(MAX_REPORT_MESSAGE_CHARS).toBeGreaterThan(512);
+    expect(MAX_DISPLAY_MESSAGE_CHARS).toBeGreaterThan(256);
+    expect(MAX_ERROR_NAME_CHARS).toBeGreaterThanOrEqual(64);
+  });
+});
+
+describe('ErrorReport payload bounds', () => {
+  it('truncates report.message to MAX_REPORT_MESSAGE_CHARS', () => {
+    const long = 'x'.repeat(MAX_REPORT_MESSAGE_CHARS + 500);
+    const onError = jest.fn();
+    render(
+      <FrontendGlobalErrorBoundary onError={onError}>
+        <Throw error={new Error(long)} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    const report: ErrorReport = onError.mock.calls[0][0];
+    expect(report.message.length).toBeLessThanOrEqual(MAX_REPORT_MESSAGE_CHARS);
+    expect(report.message.endsWith('\u2026')).toBe(true);
+  });
+
+  it('truncates report.errorName to MAX_ERROR_NAME_CHARS', () => {
+    const onError = jest.fn();
+    const e = new Error('x');
+    e.name = 'Y'.repeat(MAX_ERROR_NAME_CHARS + 20);
+    render(
+      <FrontendGlobalErrorBoundary onError={onError}>
+        <Throw error={e} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    const report: ErrorReport = onError.mock.calls[0][0];
+    expect(report.errorName.length).toBeLessThanOrEqual(MAX_ERROR_NAME_CHARS);
+  });
+});
+
+describe('Classification haystack window', () => {
+  it('does not treat keyword-only-at-end-of-huge-message as contract error', () => {
+    const prefixLen = MAX_CLASSIFICATION_INPUT_CHARS + 100;
+    const msg = `${'a'.repeat(prefixLen)}stellar`;
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new Error(msg)} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(screen.getByText('Documentation Loading Error')).toBeTruthy();
+    expect(screen.queryByText('Smart Contract Error')).toBeNull();
+  });
+});
+
+describe('Dev-only display truncation', () => {
+  it('shows at most MAX_DISPLAY_MESSAGE_CHARS in details pre', () => {
+    const long = 'z'.repeat(MAX_DISPLAY_MESSAGE_CHARS + 400);
+    const { container } = render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new Error(long)} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    const pre = container.querySelector('pre');
+    expect(pre).toBeTruthy();
+    expect((pre as HTMLElement).textContent!.length).toBeLessThanOrEqual(
+      MAX_DISPLAY_MESSAGE_CHARS,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Custom error classes
+// ---------------------------------------------------------------------------
 
 describe('Custom error classes', () => {
   it('ContractError has correct name and extends Error', () => {
@@ -34,6 +153,10 @@ describe('Custom error classes', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Normal rendering (no error)
+// ---------------------------------------------------------------------------
+
 describe('Normal rendering (no error)', () => {
   it('renders children when no error is thrown', () => {
     render(
@@ -49,6 +172,10 @@ describe('Normal rendering (no error)', () => {
     expect(container.firstChild).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Generic error fallback
+// ---------------------------------------------------------------------------
 
 describe('Generic error fallback', () => {
   it('renders the default fallback UI on error', () => {
@@ -98,6 +225,10 @@ describe('Generic error fallback', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Smart contract error fallback
+// ---------------------------------------------------------------------------
+
 describe('Smart contract error fallback', () => {
   const contractErrors: Array<[string, Error]> = [
     ['ContractError instance', new ContractError('contract call failed')],
@@ -142,6 +273,10 @@ describe('Smart contract error fallback', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Custom fallback prop
+// ---------------------------------------------------------------------------
+
 describe('Custom fallback prop', () => {
   it('renders the custom fallback when provided', () => {
     render(
@@ -171,6 +306,10 @@ describe('Custom fallback prop', () => {
     expect(screen.queryByText('Smart Contract Error')).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Recovery via Try Again
+// ---------------------------------------------------------------------------
 
 describe('Recovery via Try Again', () => {
   it('re-renders children after clicking Try Again when error is resolved', () => {
@@ -217,6 +356,138 @@ describe('Recovery via Try Again', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Retry cap (gas efficiency)
+// ---------------------------------------------------------------------------
+
+describe('Retry cap — gas efficiency', () => {
+  it('MAX_RETRIES is exported and is a positive integer', () => {
+    expect(typeof MAX_RETRIES).toBe('number');
+    expect(MAX_RETRIES).toBeGreaterThan(0);
+  });
+
+  it('hides Try Again button after MAX_RETRIES exhausted', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new Error('persistent')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    // Exhaust all retries
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      fireEvent.click(screen.getByRole('button', { name: 'Try Again' }));
+    }
+    expect(screen.queryByRole('button', { name: 'Try Again' })).toBeNull();
+  });
+
+  it('shows max-retry message after retries exhausted', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new Error('persistent')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      fireEvent.click(screen.getByRole('button', { name: 'Try Again' }));
+    }
+    expect(screen.getByText(/Maximum retry attempts reached/i)).toBeTruthy();
+  });
+
+  it('Go Home button remains visible after retries exhausted', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new Error('persistent')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      fireEvent.click(screen.getByRole('button', { name: 'Try Again' }));
+    }
+    expect(screen.getByRole('button', { name: 'Go Home' })).toBeTruthy();
+  });
+
+  it('retry cap applies to contract errors too', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new ContractError('persistent contract error')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      fireEvent.click(screen.getByRole('button', { name: 'Try Again' }));
+    }
+    expect(screen.queryByRole('button', { name: 'Try Again' })).toBeNull();
+    expect(screen.getByText(/Maximum retry attempts reached/i)).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Error classification caching (gas efficiency)
+// ---------------------------------------------------------------------------
+
+describe('Error classification caching', () => {
+  it('classifies the same error instance consistently across multiple renders', () => {
+    const err = new ContractError('cached');
+    const onError = jest.fn();
+    const { unmount } = render(
+      <FrontendGlobalErrorBoundary onError={onError}>
+        <Throw error={err} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(onError.mock.calls[0][0].isSmartContractError).toBe(true);
+    unmount();
+    // Re-render with same error instance — classification must be consistent
+    render(
+      <FrontendGlobalErrorBoundary onError={onError}>
+        <Throw error={err} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(onError.mock.calls[1][0].isSmartContractError).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Non-Error thrown values (reliability)
+// ---------------------------------------------------------------------------
+
+describe('Non-Error thrown values', () => {
+  it('handles a thrown string without crashing', () => {
+    const ThrowString = () => { throw 'string error'; };
+    expect(() =>
+      render(
+        <FrontendGlobalErrorBoundary>
+          <ThrowString />
+        </FrontendGlobalErrorBoundary>,
+      ),
+    ).not.toThrow();
+    expect(screen.getByRole('alert')).toBeTruthy();
+  });
+
+  it('handles a thrown null without crashing', () => {
+    const ThrowNull = () => { throw null; };
+    expect(() =>
+      render(
+        <FrontendGlobalErrorBoundary>
+          <ThrowNull />
+        </FrontendGlobalErrorBoundary>,
+      ),
+    ).not.toThrow();
+    expect(screen.getByRole('alert')).toBeTruthy();
+  });
+
+  it('handles a thrown number without crashing', () => {
+    const ThrowNumber = () => { throw 42; };
+    expect(() =>
+      render(
+        <FrontendGlobalErrorBoundary>
+          <ThrowNumber />
+        </FrontendGlobalErrorBoundary>,
+      ),
+    ).not.toThrow();
+    expect(screen.getByRole('alert')).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// onError callback — called exactly once per error (gas efficiency)
+// ---------------------------------------------------------------------------
+
 describe('onError callback', () => {
   it('calls onError with a structured report when an error is caught', () => {
     const onError = jest.fn();
@@ -259,7 +530,20 @@ describe('onError callback', () => {
       ),
     ).not.toThrow();
   });
+  it('onError is called exactly once per error event, not on every render', () => {
+    const onError = jest.fn();
+    render(
+      <FrontendGlobalErrorBoundary onError={onError}>
+        <Throw error={new Error('once')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
 });
+
+// ---------------------------------------------------------------------------
+// Accessibility
+// ---------------------------------------------------------------------------
 
 describe('Accessibility', () => {
   it('fallback container has role alert', () => {
@@ -294,7 +578,22 @@ describe('Accessibility', () => {
     );
     expect(container.querySelector('[aria-hidden="true"]')).toBeTruthy();
   });
+  it('max-retry status message has role="status"', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new Error('persistent')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      fireEvent.click(screen.getByRole('button', { name: 'Try Again' }));
+    }
+    expect(screen.getByRole('status')).toBeTruthy();
+  });
 });
+
+// ---------------------------------------------------------------------------
+// Error classification edge cases
+// ---------------------------------------------------------------------------
 
 describe('Error classification edge cases', () => {
   it('classifies NetworkError as smart contract error', () => {
@@ -341,5 +640,85 @@ describe('Error classification edge cases', () => {
       ),
     ).not.toThrow();
     expect(screen.getByRole('alert')).toBeTruthy();
+  });
+  it('classifies ledger keyword as contract error', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new Error('ledger sequence mismatch')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(screen.getByText('Smart Contract Error')).toBeTruthy();
+  });
+});
+
+// ── Documentation accuracy tests ─────────────────────────────────────────────
+// These tests verify that the rendered UI matches what the documentation
+// describes, catching doc/code mismatches early.
+
+describe('Documentation accuracy', () => {
+  it('generic fallback title is "Documentation Loading Error" (not "Something went wrong")', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new TypeError('cannot read property x')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(screen.getByText('Documentation Loading Error')).toBeTruthy();
+    expect(screen.queryByText('Something went wrong')).toBeNull();
+  });
+
+  it('smart contract fallback title is "Smart Contract Error"', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new ContractError('bad call')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(screen.getByText('Smart Contract Error')).toBeTruthy();
+  });
+
+  it('generic fallback shows warning icon ⚠️', () => {
+    const { container } = render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new Error('generic')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(container.textContent).toContain('⚠️');
+  });
+
+  it('smart contract fallback shows link icon 🔗', () => {
+    const { container } = render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new ContractError('bad')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(container.textContent).toContain('🔗');
+  });
+
+  it('generic fallback has "Try Again" and "Go Home" buttons as documented', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new Error('generic')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(screen.getByRole('button', { name: 'Try Again' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Go Home' })).toBeTruthy();
+  });
+
+  it('smart contract fallback has "Try Again" and "Go Home" buttons as documented', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new ContractError('bad')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(screen.getByRole('button', { name: 'Try Again' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Go Home' })).toBeTruthy();
+  });
+
+  it('smart contract fallback shows wallet balance guidance as documented', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new ContractError('insufficient funds')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(screen.getByText(/Check your wallet balance/i)).toBeTruthy();
   });
 });

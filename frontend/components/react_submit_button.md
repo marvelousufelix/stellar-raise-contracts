@@ -1,158 +1,203 @@
-# React Submit Button — Dependencies
+# ReactSubmitButton
 
-Documents the runtime dependencies, peer requirements, dev toolchain, and upgrade guidance for `react_submit_button.tsx`.
+A typed React submit button with a strict state machine, safe label handling,
+double-submit prevention, and ARIA accessibility semantics.
 
----
-
-## Runtime Dependencies
-
-The component has **zero production dependencies beyond React itself**.
-
-| Package | Version range | Role | Justification |
-|---------|--------------|------|---------------|
-| `react` | `^19.0.0` | Peer — JSX, hooks (`useState`) | Required for component rendering |
-| `react-dom` | `^19.0.0` | Peer — DOM rendering | Required by the consuming app; not imported directly |
-
-No third-party UI libraries, animation libraries, or utility packages are imported. This keeps the bundle contribution of this component to a minimum and eliminates transitive dependency risk.
+Refactored for CI/CD readability: `useState` replaced with `useReducer`,
+`onClick` stabilised with `useCallback`, and an `isMounted` ref guard added
+to prevent state updates after unmount.
 
 ---
 
-## Dev / Test Dependencies
+## States
 
-| Package | Version range | Role |
-|---------|--------------|------|
-| `@testing-library/react` | `^16.0.0` | `render`, `screen`, `fireEvent`, `act` |
-| `@testing-library/jest-dom` | `^6.0.0` | Extended matchers (used via `jest.setup.ts`) |
-| `@testing-library/user-event` | `^14.0.0` | Available for future interaction tests |
-| `jest` | `^30.0.0` | Test runner |
-| `jest-environment-jsdom` | `^30.0.0` | DOM environment for React tests |
-| `ts-jest` | `^29.0.0` | TypeScript transform for Jest |
-| `typescript` | `^5.0.0` | Type checking |
-| `@types/react` | `^19.0.0` | React type definitions |
-| `@types/jest` | `^30.0.0` | Jest type definitions |
+| State        | Description                                      | Clickable |
+|--------------|--------------------------------------------------|-----------|
+| `idle`       | Default — ready to submit                        | ✅        |
+| `submitting` | Async action in-flight; blocks interaction       | ❌        |
+| `success`    | Action confirmed; blocks re-submission           | ❌        |
+| `error`      | Action failed; user can retry                    | ✅        |
+| `disabled`   | Externally locked (deadline passed, goal met…)   | ❌        |
 
-All dev dependencies are declared in the workspace `package.json` and are not shipped to production.
-
----
-
-## Peer Dependency Requirements
-
-### React 19
-
-The component uses:
-
-- `useState` — local in-flight submission guard
-- `React.MouseEvent<HTMLButtonElement>` — typed click handler
-- `React.CSSProperties` — inline style typing
-- `react-jsx` transform — no explicit `React` import needed at call sites
-
-React 18 is also compatible. The only React 19 feature used is the `react-jsx` automatic JSX transform, which was introduced in React 17. **Minimum supported React version: 17**.
-
-### TypeScript 4.7+
-
-The component uses:
-
-- Const type parameters (TypeScript 5.0) — not used; compatible with TS 4.7+
-- Template literal types — not used
-- Strict union types and `Record<K, V>` — available since TS 4.1
-
-**Minimum supported TypeScript version: 4.7**.
-
----
-
-## What the Component Does NOT Depend On
-
-| Excluded dependency | Reason |
-|--------------------|--------|
-| `classnames` / `clsx` | Class logic is a single optional prop passthrough |
-| `styled-components` / `emotion` | Styles are inline `React.CSSProperties` constants |
-| `framer-motion` / `react-spring` | Transitions use CSS `transition` property only |
-| `react-hook-form` | Component is form-library agnostic |
-| `zustand` / `redux` | State is fully controlled by the parent via the `state` prop |
-| `lodash` | No utility functions needed |
-| `uuid` | No ID generation needed |
-
-Keeping the dependency surface minimal reduces:
-- Bundle size impact on the consuming app
-- Supply-chain attack surface
-- Version conflict risk in monorepos
-
----
-
-## Dependency Graph
+### Allowed transitions
 
 ```
-react_submit_button.tsx
-└── react          (peer, runtime)
-    └── react-dom  (peer, runtime — consuming app only)
+idle        → submitting | disabled
+submitting  → success | error | disabled
+success     → idle | disabled
+error       → idle | submitting | disabled
+disabled    → idle
+```
 
-react_submit_button.test.tsx
-├── react                        (peer)
-├── @testing-library/react       (dev)
-├── @testing-library/jest-dom    (dev, via jest.setup.ts)
-└── react_submit_button.tsx      (local)
+Same-state updates are always allowed (idempotent).
+
+---
+
+## Props
+
+| Prop                | Type                                              | Default      | Description                                              |
+|---------------------|---------------------------------------------------|--------------|----------------------------------------------------------|
+| `state`             | `SubmitButtonState`                               | —            | Current button state (required)                          |
+| `previousState`     | `SubmitButtonState`                               | `undefined`  | Previous state for strict transition validation          |
+| `strictTransitions` | `boolean`                                         | `true`       | Falls back to `previousState` on invalid transitions     |
+| `labels`            | `SubmitButtonLabels`                              | `undefined`  | Per-state label overrides                                |
+| `onClick`           | `(e: MouseEvent) => void \| Promise<void>`        | `undefined`  | Click handler; blocked while submitting/disabled         |
+| `className`         | `string`                                          | `undefined`  | Additional CSS class                                     |
+| `id`                | `string`                                          | `undefined`  | HTML `id` attribute                                      |
+| `type`              | `"button" \| "submit" \| "reset"`                 | `"button"`   | HTML button type                                         |
+| `disabled`          | `boolean`                                         | `undefined`  | External disabled override                               |
+
+---
+
+## Default labels
+
+| State        | Label             |
+|--------------|-------------------|
+| `idle`       | `Submit`          |
+| `submitting` | `Submitting...`   |
+| `success`    | `Submitted`       |
+| `error`      | `Try Again`       |
+| `disabled`   | `Submit Disabled` |
+
+---
+
+## Usage
+
+```tsx
+import ReactSubmitButton from "./react_submit_button";
+
+// Basic
+<ReactSubmitButton state="idle" onClick={handleSubmit} />
+
+// With custom labels
+<ReactSubmitButton
+  state={txState}
+  previousState={prevTxState}
+  labels={{ idle: "Fund Campaign", submitting: "Funding...", success: "Funded!" }}
+  onClick={handleContribute}
+/>
+
+// Externally disabled (e.g. campaign deadline passed)
+<ReactSubmitButton state="disabled" labels={{ disabled: "Campaign Ended" }} />
 ```
 
 ---
 
-## Version Pinning Policy
+## Refactor notes (CI/CD)
 
-The workspace `package.json` uses caret ranges (`^`) for all dependencies. This allows non-breaking minor and patch updates while preventing automatic major version upgrades.
+### useReducer replaces useState
 
-For production deployments, pin exact versions in `package-lock.json` (already committed) and run `npm ci` rather than `npm install` to guarantee reproducible installs.
+The local `isLocallySubmitting` flag is now managed by `submitButtonReducer`.
+This makes state transitions explicit and grep-able in CI logs:
 
----
+```ts
+// Before
+const [isLocallySubmitting, setIsLocallySubmitting] = useState(false);
 
-## Upgrading React
+// After
+const [{ isLocallySubmitting }, dispatch] = useReducer(submitButtonReducer, {
+  isLocallySubmitting: false,
+});
+dispatch({ type: "START_SUBMIT" });
+dispatch({ type: "END_SUBMIT" });
+```
 
-### React 17 → 18
+`submitButtonReducer` is exported so CI can test it in isolation without
+mounting a component.
 
-No changes required. The component does not use `ReactDOM.render` (removed in React 18) or any deprecated lifecycle methods.
+### useCallback stabilises handleClick
 
-### React 18 → 19
+`handleClick` is wrapped in `useCallback` with `[blocked, onClick]` as deps.
+Parent components that pass `handleClick` to `useEffect` or `useMemo` no longer
+re-run those hooks on every render.
 
-No changes required. The component does not use:
-- `ReactDOM.render` (removed in 18)
-- `act` from `react-dom/test-utils` (moved to `react` in 19 — tests already import from `@testing-library/react`)
-- Concurrent features that changed API between 18 and 19
+### isMounted ref guard
 
-### Upgrading `@testing-library/react`
+A `isMountedRef` prevents `dispatch({ type: "END_SUBMIT" })` from firing after
+the component unmounts during a slow async `onClick`. This eliminates the
+React "setState on unmounted component" warning in CI test output.
 
-The test suite uses `render`, `screen`, `fireEvent`, and `act` — all stable APIs present since `@testing-library/react` v13. No breaking changes are expected through v16.
+### inFlight ref guard
 
----
-
-## Security Assumptions Related to Dependencies
-
-1. **No `dangerouslySetInnerHTML`** — the component never uses this API, so XSS via label content is not possible regardless of React version.
-2. **No dynamic `import()`** — the component is statically bundled; no code-splitting attack surface.
-3. **No network calls** — the component is purely presentational; it emits events to the parent and renders state. No fetch, axios, or WebSocket dependency.
-4. **Inline styles only** — no CSS-in-JS runtime that could be exploited via style injection. All colour values are hardcoded constants in `STATE_STYLES`.
-
----
-
-## NatSpec-style Reference
-
-### Dependency contract
-- **@notice** `react_submit_button.tsx` has one runtime peer dependency: `react ≥ 17`.
-- **@dev** All other imports are local types and constants — no third-party runtime packages.
-- **@security** Zero third-party runtime dependencies eliminates transitive supply-chain risk for this component.
+`inFlightRef` is checked at the top of `handleClick` to block double-submit
+even if the parent re-renders the component with `state="idle"` while an async
+handler is still in-flight.
 
 ---
 
-## Running Tests
+## Exported helpers
+
+All pure functions are exported for independent unit testing.
+
+| Export                                | Purpose                                                        |
+|---------------------------------------|----------------------------------------------------------------|
+| `submitButtonReducer`                 | Pure reducer for local submitting state (new)                  |
+| `normalizeSubmitButtonLabel`          | Sanitises a label: strips control chars, truncates to 80 chars |
+| `resolveSubmitButtonLabel`            | Returns the safe label for a given state                       |
+| `isValidSubmitButtonStateTransition`  | Validates a `from → to` state transition                       |
+| `resolveSafeSubmitButtonState`        | Enforces strict transitions, falls back to `previousState`     |
+| `isSubmitButtonInteractionBlocked`    | Returns `true` when clicks must be suppressed                  |
+| `isSubmitButtonBusy`                  | Returns `true` when `aria-busy` should be set                  |
+| `ALLOWED_TRANSITIONS`                 | Transition map (shared by component and tests)                 |
+| `DEFAULT_LABELS`                      | Default label map (shared by component and tests)              |
+| `MAX_LABEL_LENGTH`                    | Label truncation constant (shared by component and tests)      |
+
+---
+
+## Security assumptions
+
+- **No `dangerouslySetInnerHTML`** — labels are rendered as React text nodes only.
+- **Label sanitisation** — control characters (`U+0000–U+001F`, `U+007F`) are
+  stripped; labels are truncated to `MAX_LABEL_LENGTH` (80) to prevent layout abuse.
+- **Double-submit prevention** — `inFlightRef` blocks re-entry while an async
+  `onClick` is in-flight, preventing duplicate blockchain transactions even if
+  the parent re-renders with `state="idle"` mid-flight.
+- **isMounted guard** — `dispatch` is skipped after unmount to prevent memory
+  leaks and spurious React warnings in CI.
+- **Hardcoded styles** — all CSS values are compile-time constants; no dynamic
+  style injection from user input.
+- **Input validation is the caller's responsibility** — the component surfaces
+  state only; it never submits data itself.
+
+---
+
+## Accessibility
+
+- `aria-live="polite"` — state label changes are announced to screen readers.
+- `aria-busy` — set to `true` while submitting.
+- `aria-label` — always set to the resolved, sanitised label.
+- `disabled` — set on the HTML element when interaction is blocked, preventing
+  keyboard activation.
+
+---
+
+## Tests
+
+```
+frontend/components/react_submit_button.test.tsx
+```
+
+Run:
 
 ```bash
-# Run with coverage report
-npx jest --testPathPatterns=react_submit_button --coverage
-
-# Watch mode during development
-npm run test:watch -- --testPathPatterns=react_submit_button
+npx jest frontend/components/react_submit_button.test.tsx
 ```
 
-### Latest test output
+### Coverage (≥ 95%)
 
-```
-Tests:    51 passed, 51 total
-Coverage: 97.67% statements | 96.87% branches | 100% functions | 100% lines
-```
+| Area                                        | Cases |
+|---------------------------------------------|-------|
+| `submitButtonReducer`                       | 3     |
+| `normalizeSubmitButtonLabel`                | 8     |
+| `resolveSubmitButtonLabel`                  | 5     |
+| `isValidSubmitButtonStateTransition`        | 3     |
+| `resolveSafeSubmitButtonState`              | 6     |
+| `isSubmitButtonInteractionBlocked`          | 6     |
+| `isSubmitButtonBusy`                        | 3     |
+| Rendering                                   | 9     |
+| Disabled / blocked states                   | 5     |
+| Accessibility attributes                    | 4     |
+| Click handling (incl. double-submit, async) | 9     |
+| Strict transition enforcement               | 4     |
+| isMounted guard (unmount during async)      | 1     |
+| **Total**                                   | **66**|

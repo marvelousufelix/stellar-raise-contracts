@@ -1,146 +1,91 @@
-# npm_package_lock — Vulnerability Audit Module
+# NPM package-lock.json Minor Vulnerabilities — Documentation
 
-## Overview
+## Summary
 
-This module audits `package-lock.json` dependency entries for known security
-vulnerabilities, version constraint violations, and integrity hash validity.
+This update resolves two vulnerabilities found by `npm audit` and updates the
+`npm_package_lock.rs` auditor module to track all three known advisories.
 
-It was introduced to address **GHSA-xpqw-6gx7-v673** — a high-severity
-Denial-of-Service vulnerability in `svgo` versions `>=3.0.0 <3.3.3` caused
-by unconstrained XML entity expansion (Billion Laughs attack) when processing
-SVG files containing a malicious `DOCTYPE` declaration.
+## Vulnerabilities Fixed (2026-03)
 
----
+| Package | Advisory | Severity | Vulnerable range | Fixed in |
+|---------|----------|----------|-----------------|----------|
+| `brace-expansion` | [GHSA-f886-m6hf-6m8v](https://github.com/advisories/GHSA-f886-m6hf-6m8v) | Moderate | `<1.1.13` or `>=2.0.0 <2.0.3` | `2.0.3` |
+| `handlebars` | [GHSA-xjpj-3mr7-gcpf](https://github.com/advisories/GHSA-xjpj-3mr7-gcpf) + related | Critical | `4.0.0 - 4.7.8` | `4.7.9` |
 
-## Vulnerability Fixed
+`svgo` was already at `3.3.3` (patched for GHSA-xpqw-6gx7-v673).
 
-| Field        | Value |
-|--------------|-------|
-| Advisory     | [GHSA-xpqw-6gx7-v673](https://github.com/advisories/GHSA-xpqw-6gx7-v673) |
-| Package      | `svgo` |
-| Severity     | High (CVSS 7.5) |
-| CWE          | CWE-776 (Improper Restriction of Recursive Entity References) |
-| Affected     | `>=3.0.0 <3.3.3` |
-| Fixed in     | `3.3.3` |
-| CVSS vector  | `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H` |
+### brace-expansion — GHSA-f886-m6hf-6m8v
 
-### What changed
+A zero-step sequence (e.g. `{0..0}`) causes the parser to enter an infinite
+loop, exhausting memory and hanging the process. CWE-400 (Uncontrolled Resource
+Consumption). CVSS 6.5 (Moderate).
 
-`package.json` and `package-lock.json` were updated to resolve `svgo@3.3.3`,
-the first patched release. Run `npm audit` to confirm zero vulnerabilities.
+### handlebars — GHSA-xjpj-3mr7-gcpf and related
+
+Multiple JavaScript injection vulnerabilities via AST type confusion, unescaped
+names in the CLI precompiler, and prototype pollution through partial template
+injection. All fixed in 4.7.9.
 
 ---
 
-## Files
+## How the Fix Was Applied
 
-| File | Purpose |
-|------|---------|
-| `npm_package_lock.rs` | Contract — pure audit functions |
-| `npm_package_lock.test.rs` | Test suite (≥95% coverage) |
-| `npm_package_lock.md` | This document |
-
----
-
-## Contract API (`npm_package_lock.rs`)
-
-### Types
-
-```rust
-pub struct PackageEntry {
-    pub name: String,
-    pub version: String,  // resolved semver
-    pub integrity: String, // sha512-... hash
-    pub dev: bool,
-}
-
-pub struct AuditResult {
-    pub package_name: String,
-    pub passed: bool,
-    pub issues: Vec<String>,
-}
+```bash
+npm install --package-lock-only   # regenerate lockfile
+npm audit fix                     # resolve vulnerable transitive deps
+# Result: 0 vulnerabilities, 3 packages changed
 ```
 
-### Functions
-
-| Function | Description |
-|----------|-------------|
-| `parse_semver(version)` | Parses a semver string into `(major, minor, patch)` |
-| `is_version_gte(version, min)` | Returns `true` if `version >= min` |
-| `validate_integrity(integrity)` | Validates sha512 hash presence and prefix |
-| `audit_package(entry, min_safe_versions)` | Audits one package entry |
-| `audit_all(packages, min_safe_versions)` | Audits a full lockfile snapshot |
-| `failing_results(results)` | Filters to only failing audit results |
-| `validate_lockfile_version(version)` | Accepts only lockfileVersion 2 or 3 |
+The fix updates transitive dependencies in `package-lock.json` only — no
+direct dependency versions in `package.json` were changed.
 
 ---
 
-## Usage Example
+## Auditor Module Changes (`npm_package_lock.rs`)
+
+### New: `MAX_PACKAGES` constant
 
 ```rust
-use std::collections::HashMap;
-use npm_package_lock::{audit_all, failing_results, PackageEntry};
-
-let mut advisories = HashMap::new();
-advisories.insert("svgo".to_string(), "3.3.3".to_string());
-
-let packages = vec![
-    PackageEntry {
-        name: "svgo".to_string(),
-        version: "3.3.3".to_string(),
-        integrity: "sha512-...".to_string(),
-        dev: true,
-    },
-];
-
-let results = audit_all(&packages, &advisories);
-let failures = failing_results(&results);
-assert!(failures.is_empty(), "Vulnerabilities found: {:?}", failures);
+pub const MAX_PACKAGES: usize = 500;
 ```
 
----
+Hard cap for `audit_all_bounded` to prevent unbounded processing.
 
-## Test Coverage
+### New: `default_min_safe_versions()`
 
-The test suite in `npm_package_lock.test.rs` covers:
+Returns the canonical advisory map including all three known advisories.
+Update this function whenever a new advisory is published.
 
-- `parse_semver` — 9 cases (standard, v-prefix, pre-release, zeros, large
-  numbers, missing patch, empty, non-numeric, partial numeric)
-- `is_version_gte` — 9 cases (equal, greater patch/minor/major, less
-  patch/minor/major, invalid inputs)
-- `validate_integrity` — 5 cases (valid sha512, empty, wrong algorithm,
-  prefix-only, no prefix)
-- `audit_package` — 9 cases including all GHSA-xpqw-6gx7-v673 boundary
-  versions (3.0.0, 3.3.2, 3.3.3, 3.4.0), integrity failures, combined
-  failures, unknown packages, and result field correctness
-- `audit_all` — 3 cases (mixed, empty input, all pass)
-- `failing_results` — 2 cases (filters correctly, empty when all pass)
-- `validate_lockfile_version` — 5 cases (2, 3, 1, 0, 4)
+### New: `audit_all_bounded()`
 
-Total: **42 test cases** — exceeds the 95% coverage requirement.
+Bounded variant of `audit_all` that rejects inputs exceeding `MAX_PACKAGES`.
+Use this wherever input size is not statically known.
 
 ---
 
 ## Security Assumptions
 
-1. `sha512` integrity hashes are the only accepted algorithm; `sha1` and
-   `sha256` are rejected as insufficient.
-2. `lockfileVersion` must be 2 or 3 (npm >=7). Version 1 lacks integrity
-   hashes for all entries and is considered insecure.
-3. The advisory map (`min_safe_versions`) must be kept up to date as new
-   CVEs are published. This module does not perform live advisory lookups.
-4. This module audits resolved versions only. Ranges in `package.json`
-   should be reviewed separately to prevent future resolution of vulnerable
-   versions.
+- `package-lock.json` is committed to version control and reviewed on every PR.
+- `npm audit` is run in CI on every push (see `.github/workflows/`).
+- Only `lockfileVersion` 2 and 3 are accepted (npm >=7).
+- Integrity hashes (`sha512-`) are validated to be non-empty.
+- The `default_min_safe_versions()` map must be kept up to date as new
+  advisories are published.
 
 ---
 
-## Commit Reference
+## Test Coverage
 
-```
-feat: implement add-test-for-npm-packagelockjson-minor-vulnerabilities-for-optimization with tests and docs
-```
+New tests in `npm_package_lock.test.rs` (`advisory_update_tests` module):
 
-- Upgraded `svgo` from `3.3.2` to `3.3.3` (fixes GHSA-xpqw-6gx7-v673)
-- Added `npm_package_lock.rs` contract with NatSpec-style comments
-- Added `npm_package_lock.test.rs` with 42 test cases (≥95% coverage)
-- Added `npm_package_lock.md` documentation
+| Test | Verifies |
+|------|---------|
+| `test_default_map_contains_brace_expansion` | Advisory map has brace-expansion entry |
+| `test_default_map_contains_handlebars` | Advisory map has handlebars entry |
+| `test_brace_expansion_vulnerable_2_0_2_fails` | 2.0.2 detected as vulnerable |
+| `test_brace_expansion_patched_2_0_3_passes` | 2.0.3 passes |
+| `test_handlebars_vulnerable_4_7_8_fails` | 4.7.8 detected as vulnerable |
+| `test_handlebars_patched_4_7_9_passes` | 4.7.9 passes |
+| `test_full_snapshot_all_patched_passes` | All three patched versions pass together |
+| `test_full_snapshot_all_vulnerable_fails` | All three vulnerable versions fail together |
+| `test_bounded_one_over_limit_err` | MAX_PACKAGES cap enforced |

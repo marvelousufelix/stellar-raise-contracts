@@ -111,7 +111,9 @@
     "discriminant",
     "idempotent",
     "GoalTooLow",
-    "auditable"
+    "auditable",
+    "permissionless",
+    "nocapture"
   ],
   "ignorePaths": [
     "node_modules/**",
