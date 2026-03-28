@@ -1,13 +1,17 @@
 /**
- * @title React Submit Button — Comprehensive Test Suite
- * @notice Covers label safety, state transitions, interaction blocking,
- *         accessibility attributes, and component rendering.
- * @dev Targets ≥ 95% coverage of react_submit_button.tsx.
+ * @title   React Submit Button — Comprehensive Test Suite
+ * @notice  Covers label safety, state transitions, interaction blocking,
+ *          accessibility attributes, component rendering, and the new
+ *          useReducer / useCallback / isMounted refactor paths.
+ * @dev     Targets ≥ 95% coverage of react_submit_button.tsx.
+ *          Run: npx jest frontend/components/react_submit_button.test.tsx
  */
 import React from "react";
 import { render, screen, fireEvent, act } from "@testing-library/react";
 import ReactSubmitButton, {
   ALLOWED_TRANSITIONS,
+  DEFAULT_LABELS,
+  MAX_LABEL_LENGTH,
   isSubmitButtonBusy,
   isSubmitButtonDisabled,
   isSubmitButtonInteractionBlocked,
@@ -16,6 +20,7 @@ import ReactSubmitButton, {
   resolveSafeSubmitButtonState,
   resolveSubmitButtonLabel,
   resolveSafeSubmitButtonState,
+  submitButtonReducer,
   type ReactSubmitButtonProps,
   type SubmitButtonLabels,
   type SubmitButtonState,
@@ -28,7 +33,39 @@ function renderBtn(props: Partial<ReactSubmitButtonProps> = {}) {
   return container.querySelector("button") as HTMLButtonElement;
 }
 
-const ALL_STATES: SubmitButtonState[] = ["idle", "submitting", "success", "error", "disabled"];
+const ALL_STATES: SubmitButtonState[] = [
+  "idle",
+  "submitting",
+  "success",
+  "error",
+  "disabled",
+];
+
+// ── submitButtonReducer ───────────────────────────────────────────────────────
+
+describe("submitButtonReducer", () => {
+  it("START_SUBMIT sets isLocallySubmitting to true", () => {
+    const next = submitButtonReducer(
+      { isLocallySubmitting: false },
+      { type: "START_SUBMIT" },
+    );
+    expect(next.isLocallySubmitting).toBe(true);
+  });
+
+  it("END_SUBMIT sets isLocallySubmitting to false", () => {
+    const next = submitButtonReducer(
+      { isLocallySubmitting: true },
+      { type: "END_SUBMIT" },
+    );
+    expect(next.isLocallySubmitting).toBe(false);
+  });
+
+  it("returns current state for unknown action", () => {
+    const state = { isLocallySubmitting: true };
+    // @ts-expect-error intentional unknown action for edge-case test
+    expect(submitButtonReducer(state, { type: "UNKNOWN" })).toBe(state);
+  });
+});
 
 // ── normalizeSubmitButtonLabel ────────────────────────────────────────────────
 
@@ -59,7 +96,7 @@ describe("normalizeSubmitButtonLabel", () => {
     expect(normalized).toHaveLength(80);
     expect(normalized.endsWith("...")).toBe(true);
   it("returns the label unchanged when within the 80-char limit", () => {
-    const label = "A".repeat(80);
+    const label = "A".repeat(MAX_LABEL_LENGTH);
     expect(normalizeSubmitButtonLabel(label, "Submit")).toBe(label);
   });
 
@@ -78,14 +115,20 @@ describe("resolveSubmitButtonLabel", () => {
   it("truncates labels exceeding 80 characters with ellipsis", () => {
     const long = "A".repeat(200);
     const result = normalizeSubmitButtonLabel(long, "Submit");
-    expect(result).toHaveLength(80);
+    expect(result).toHaveLength(MAX_LABEL_LENGTH);
     expect(result.endsWith("...")).toBe(true);
   });
 
-  it("preserves hostile markup-like text as a plain string", () => {
+  it("preserves markup-like text as a plain string (XSS safe)", () => {
     const xss = "<img src=x onerror=alert(1) />";
-    // Security: React renders this as text, not HTML.
     expect(normalizeSubmitButtonLabel(xss, "Submit")).toBe(xss);
+  });
+
+  it("handles a string of exactly MAX_LABEL_LENGTH + 1 chars", () => {
+    const label = "B".repeat(MAX_LABEL_LENGTH + 1);
+    const result = normalizeSubmitButtonLabel(label, "Submit");
+    expect(result).toHaveLength(MAX_LABEL_LENGTH);
+    expect(result.endsWith("...")).toBe(true);
   });
 });
 
@@ -94,8 +137,9 @@ describe("resolveSubmitButtonLabel", () => {
 
 describe("resolveSubmitButtonLabel", () => {
   it("returns correct defaults for every state", () => {
-    const expected = ["Submit", "Submitting...", "Submitted", "Try Again", "Submit Disabled"];
-    expect(ALL_STATES.map((s) => resolveSubmitButtonLabel(s))).toEqual(expected);
+    ALL_STATES.forEach((s) => {
+      expect(resolveSubmitButtonLabel(s)).toBe(DEFAULT_LABELS[s]);
+    });
   });
 
   it("uses valid custom labels", () => {
@@ -140,8 +184,12 @@ describe("resolveSubmitButtonLabel", () => {
   it("trims and truncates oversized custom labels", () => {
     const labels: SubmitButtonLabels = { success: `   ${"A".repeat(90)}   ` };
     const result = resolveSubmitButtonLabel("success", labels);
-    expect(result).toHaveLength(80);
+    expect(result).toHaveLength(MAX_LABEL_LENGTH);
     expect(result.endsWith("...")).toBe(true);
+  });
+
+  it("returns default when labels object is undefined", () => {
+    expect(resolveSubmitButtonLabel("error", undefined)).toBe("Try Again");
   });
 });
 
@@ -149,7 +197,10 @@ describe("resolveSubmitButtonLabel", () => {
 
 describe("isValidSubmitButtonStateTransition", () => {
   it("allows all transitions defined in ALLOWED_TRANSITIONS", () => {
-    for (const [from, targets] of Object.entries(ALLOWED_TRANSITIONS) as [SubmitButtonState, SubmitButtonState[]][]) {
+    for (const [from, targets] of Object.entries(ALLOWED_TRANSITIONS) as [
+      SubmitButtonState,
+      SubmitButtonState[],
+    ][]) {
       for (const to of targets) {
         expect(isValidSubmitButtonStateTransition(from, to)).toBe(true);
       }
@@ -169,6 +220,7 @@ describe("isValidSubmitButtonStateTransition", () => {
     expect(isValidSubmitButtonStateTransition("success", "submitting")).toBe(false);
     expect(isValidSubmitButtonStateTransition("disabled", "submitting")).toBe(false);
     expect(isValidSubmitButtonStateTransition("disabled", "success")).toBe(false);
+    expect(isValidSubmitButtonStateTransition("disabled", "error")).toBe(false);
   });
 });
 
@@ -179,6 +231,8 @@ describe("resolveSafeSubmitButtonState", () => {
     expect(resolveSafeSubmitButtonState("submitting", "idle", true)).toBe("submitting");
     expect(resolveSafeSubmitButtonState("success", "submitting", true)).toBe("success");
     expect(resolveSafeSubmitButtonState("error", "submitting", true)).toBe("error");
+    expect(resolveSafeSubmitButtonState("idle", "success", true)).toBe("idle");
+    expect(resolveSafeSubmitButtonState("idle", "error", true)).toBe("idle");
   });
 
   it("falls back to previousState for invalid transitions in strict mode", () => {
@@ -200,6 +254,12 @@ describe("resolveSafeSubmitButtonState", () => {
   it("defaults strictTransitions to true", () => {
     // idle → success is invalid; should fall back to idle
     expect(resolveSafeSubmitButtonState("success", "idle")).toBe("idle");
+  });
+
+  it("allows same-state in strict mode (idempotent)", () => {
+    ALL_STATES.forEach((s) => {
+      expect(resolveSafeSubmitButtonState(s, s, true)).toBe(s);
+    });
   });
 });
 
@@ -251,6 +311,10 @@ describe("isSubmitButtonDisabled", () => {
   it("blocks interaction for success state", () => {
     expect(isSubmitButtonInteractionBlocked("success")).toBe(true);
   });
+
+  it("blocks when both disabled flag and locally submitting are true", () => {
+    expect(isSubmitButtonInteractionBlocked("idle", true, true)).toBe(true);
+  });
 });
 
 // ── isSubmitButtonBusy ────────────────────────────────────────────────────────
@@ -263,6 +327,7 @@ describe("isSubmitButtonBusy", () => {
   it("is true when locally submitting regardless of state", () => {
     expect(isSubmitButtonBusy("idle", true)).toBe(true);
     expect(isSubmitButtonBusy("error", true)).toBe(true);
+    expect(isSubmitButtonBusy("disabled", true)).toBe(true);
   });
 
   it("is false for all non-submitting states with no local flag", () => {
@@ -277,8 +342,7 @@ describe("isSubmitButtonBusy", () => {
 
 describe("ReactSubmitButton rendering", () => {
   it("renders a button element", () => {
-    const btn = renderBtn();
-    expect(btn.tagName).toBe("BUTTON");
+    expect(renderBtn().tagName).toBe("BUTTON");
   });
 
   it("displays the resolved label as text content", () => {
@@ -308,13 +372,17 @@ describe("ReactSubmitButton rendering", () => {
   });
 
   it("applies custom className", () => {
-    const btn = renderBtn({ className: "my-btn" });
-    expect(btn.className).toContain("my-btn");
+    expect(renderBtn({ className: "my-btn" }).className).toContain("my-btn");
   });
 
   it("sets the id attribute", () => {
-    const btn = renderBtn({ id: "contribute-btn" });
-    expect(btn.id).toBe("contribute-btn");
+    expect(renderBtn({ id: "contribute-btn" }).id).toBe("contribute-btn");
+  });
+
+  it("renders all five states without throwing", () => {
+    ALL_STATES.forEach((s) => {
+      expect(() => renderBtn({ state: s })).not.toThrow();
+    });
   });
 });
 
@@ -364,6 +432,7 @@ describe("ReactSubmitButton accessibility", () => {
   it("sets aria-label to the resolved label", () => {
     expect(renderBtn({ state: "idle" }).getAttribute("aria-label")).toBe("Submit");
     expect(renderBtn({ state: "error" }).getAttribute("aria-label")).toBe("Try Again");
+    expect(renderBtn({ state: "submitting" }).getAttribute("aria-label")).toBe("Submitting...");
   });
 });
 
@@ -389,33 +458,38 @@ describe("ReactSubmitButton click handling", () => {
   it("does NOT fire onClick in submitting state", () => {
     const onClick = jest.fn();
     const { container } = render(<ReactSubmitButton state="submitting" onClick={onClick} />);
-    const btn = container.querySelector("button") as HTMLButtonElement;
-    fireEvent.click(btn);
+    fireEvent.click(container.querySelector("button") as HTMLButtonElement);
     expect(onClick).not.toHaveBeenCalled();
   });
 
   it("does NOT fire onClick in disabled state", () => {
     const onClick = jest.fn();
     const { container } = render(<ReactSubmitButton state="disabled" onClick={onClick} />);
-    const btn = container.querySelector("button") as HTMLButtonElement;
-    fireEvent.click(btn);
+    fireEvent.click(container.querySelector("button") as HTMLButtonElement);
     expect(onClick).not.toHaveBeenCalled();
   });
 
   it("does NOT fire onClick when disabled prop is true", () => {
     const onClick = jest.fn();
-    const { container } = render(<ReactSubmitButton state="idle" disabled={true} onClick={onClick} />);
-    const btn = container.querySelector("button") as HTMLButtonElement;
-    fireEvent.click(btn);
+    const { container } = render(
+      <ReactSubmitButton state="idle" disabled={true} onClick={onClick} />,
+    );
+    fireEvent.click(container.querySelector("button") as HTMLButtonElement);
+    expect(onClick).not.toHaveBeenCalled();
+  });
+
+  it("does NOT fire onClick in success state", () => {
+    const onClick = jest.fn();
+    const { container } = render(<ReactSubmitButton state="success" onClick={onClick} />);
+    fireEvent.click(container.querySelector("button") as HTMLButtonElement);
     expect(onClick).not.toHaveBeenCalled();
   });
 
   it("handles async onClick without throwing", async () => {
     const onClick = jest.fn().mockResolvedValue(undefined);
     const { container } = render(<ReactSubmitButton state="idle" onClick={onClick} />);
-    const btn = container.querySelector("button") as HTMLButtonElement;
     await act(async () => {
-      fireEvent.click(btn);
+      fireEvent.click(container.querySelector("button") as HTMLButtonElement);
     });
     expect(onClick).toHaveBeenCalledTimes(1);
   });
@@ -423,27 +497,31 @@ describe("ReactSubmitButton click handling", () => {
   it("does not propagate errors from a rejected async onClick", async () => {
     const onClick = jest.fn().mockRejectedValue(new Error("tx failed"));
     const { container } = render(<ReactSubmitButton state="idle" onClick={onClick} />);
-    const btn = container.querySelector("button") as HTMLButtonElement;
     await act(async () => {
-      fireEvent.click(btn);
+      fireEvent.click(container.querySelector("button") as HTMLButtonElement);
     });
-    // If we reach here without throwing, the component swallowed the rejection correctly.
     expect(onClick).toHaveBeenCalledTimes(1);
   });
 
-  it("does NOT fire onClick in success state", () => {
-    const onClick = jest.fn();
-    const { container } = render(<ReactSubmitButton state="success" onClick={onClick} />);
-    const btn = container.querySelector("button") as HTMLButtonElement;
-    fireEvent.click(btn);
-    expect(onClick).not.toHaveBeenCalled();
+  it("handles click gracefully when no onClick is provided", async () => {
+    const btn = renderBtn({ state: "idle" });
+    await act(async () => { fireEvent.click(btn); });
+    expect(btn).toBeTruthy();
   });
 
-  it("handles click gracefully when no onClick is provided", async () => {
-    const btn = renderBtn({ state: "idle" }); // no onClick prop
-    await act(async () => { fireEvent.click(btn); });
-    // No error thrown — the guard returns early when onClick is undefined.
-    expect(btn).toBeTruthy();
+  it("prevents double-submit on rapid successive clicks", async () => {
+    let resolveFirst!: () => void;
+    const slowClick = jest.fn(
+      () => new Promise<void>((res) => { resolveFirst = res; }),
+    );
+    const { container } = render(<ReactSubmitButton state="idle" onClick={slowClick} />);
+    const btn = container.querySelector("button") as HTMLButtonElement;
+    // First click starts the in-flight handler
+    fireEvent.click(btn);
+    // Second click while first is still in-flight — should be ignored
+    fireEvent.click(btn);
+    await act(async () => { resolveFirst(); });
+    expect(slowClick).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -451,18 +529,55 @@ describe("ReactSubmitButton click handling", () => {
 
 describe("ReactSubmitButton strict transitions", () => {
   it("renders previousState when transition is invalid in strict mode", () => {
-    // idle → success is not allowed; should render idle
-    const btn = renderBtn({ state: "success", previousState: "idle", strictTransitions: true });
+    const btn = renderBtn({
+      state: "success",
+      previousState: "idle",
+      strictTransitions: true,
+    });
     expect(btn.getAttribute("data-state")).toBe("idle");
   });
 
   it("renders requested state when transition is valid in strict mode", () => {
-    const btn = renderBtn({ state: "submitting", previousState: "idle", strictTransitions: true });
+    const btn = renderBtn({
+      state: "submitting",
+      previousState: "idle",
+      strictTransitions: true,
+    });
     expect(btn.getAttribute("data-state")).toBe("submitting");
   });
 
   it("renders requested state when strict mode is disabled", () => {
-    const btn = renderBtn({ state: "success", previousState: "idle", strictTransitions: false });
+    const btn = renderBtn({
+      state: "success",
+      previousState: "idle",
+      strictTransitions: false,
+    });
     expect(btn.getAttribute("data-state")).toBe("success");
+  });
+
+  it("renders requested state when no previousState is given", () => {
+    const btn = renderBtn({ state: "error", strictTransitions: true });
+    expect(btn.getAttribute("data-state")).toBe("error");
+  });
+});
+
+// ── ReactSubmitButton — isMounted guard (unmount during async onClick) ────────
+
+describe("ReactSubmitButton isMounted guard", () => {
+  it("does not dispatch after unmount during async onClick", async () => {
+    let resolveClick!: () => void;
+    const slowClick = jest.fn(
+      () => new Promise<void>((res) => { resolveClick = res; }),
+    );
+    const { container, unmount } = render(
+      <ReactSubmitButton state="idle" onClick={slowClick} />,
+    );
+    const btn = container.querySelector("button") as HTMLButtonElement;
+    fireEvent.click(btn);
+    // Unmount before the async handler resolves
+    unmount();
+    // Resolving after unmount should not throw or warn
+    await act(async () => { resolveClick(); });
+    expect(slowClick).toHaveBeenCalledTimes(1);
   });
 });

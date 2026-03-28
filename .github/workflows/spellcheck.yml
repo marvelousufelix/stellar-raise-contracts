@@ -11,10 +11,10 @@ jobs:
     name: Spellcheck Markdown & YAML
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Run spellcheck
-        uses: streetsidesoftware/cspell-action@v6
+        uses: streetsidesoftware/cspell-action@v8
         with:
           files: "**/*.{md,yml,yaml}"
           config: .cspell.json

@@ -15,6 +15,24 @@ componentDidCatch → sanitizeErrorMessage → boundaryRateLimiter.isAllowed()
   → fallback UI
 ```
 
+### Logging bounds
+
+`componentDidCatch` emits at most **5** `console.error` calls per **60-second** rolling window (`LOG_RATE_LIMIT` / `LOG_RATE_WINDOW_MS`). Once the limit is reached, console output is suppressed for the remainder of the window. The `onError` callback is **always** invoked regardless of the rate limit, so no events are lost from external observability services.
+
+This prevents log flooding when a component tree repeatedly throws (e.g. during a render loop or rapid retry cycles) and limits the risk of sensitive data appearing in high-volume log streams.
+
+---
+
+## Logging Bounds API
+
+| Export | Type | Value | Description |
+|--------|------|-------|-------------|
+| `LOG_RATE_LIMIT` | `number` | `5` | Max log entries per window |
+| `LOG_RATE_WINDOW_MS` | `number` | `60000` | Rolling window duration (ms) |
+| `shouldLog(now?)` | `function` | `boolean` | Returns true if a log entry is allowed |
+| `_logState` | `object` | `{ count, windowStart }` | Internal rate-limit state (test use only) |
+| `_resetLogState()` | `function` | `void` | Resets rate-limit state (test use only) |
+
 ---
 
 ## Component API

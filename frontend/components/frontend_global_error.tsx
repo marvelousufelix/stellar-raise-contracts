@@ -293,6 +293,12 @@ interface BoundaryState {
  *   Error thrown → getDerivedStateFromError (state update) →
  *   componentDidCatch (logging + reporting) → fallback render
  *
+ * Logging bounds:
+ *   At most LOG_RATE_LIMIT (5) console.error calls are emitted per
+ *   LOG_RATE_WINDOW_MS (60 s) rolling window. Subsequent errors within the
+ *   window are silently forwarded to the onError callback only, preventing
+ *   log flooding while preserving observability.
+ *
  * @custom:security
  *   - Stack traces are suppressed in production to prevent information disclosure.
  *   - Error messages are sanitised before logging to strip potential secrets.
