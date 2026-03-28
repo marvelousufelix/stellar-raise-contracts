@@ -48,48 +48,19 @@ export class TransactionError extends Error {
 // Logging infrastructure
 // ---------------------------------------------------------------------------
 
-/** @notice Severity levels for boundary log entries. */
-export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
-
-/**
- * @notice A single structured log entry emitted by the boundary.
- * @dev All fields are plain serialisable values safe to JSON.stringify and
- * forward to any log aggregator without further transformation.
- */
-export interface BoundaryLogEntry {
-  timestamp: string;
-  level: LogLevel;
-  message: string;
-  /** Sanitised error message — secrets redacted. */
-  errorMessage: string;
-  errorName: string;
-  isSmartContractError: boolean;
-  /** Omitted in production. */
-  componentStack?: string;
-  /** Omitted in production. */
-  stack?: string;
-  /** Monotonically increasing per boundary instance. */
-  sequence: number;
-}
-
-// ---------------------------------------------------------------------------
-// Log sanitisation
-// ---------------------------------------------------------------------------
-
-/**
- * @notice Patterns that may indicate sensitive data in error messages.
- * @dev Matches hex keys (32+ chars), Stellar account IDs, base64 blobs,
- * and explicit key assignment patterns.
- * @custom:security Best-effort filter — callers must not embed secrets in
- * error messages in the first place.
- */
-const SENSITIVE_PATTERNS: RegExp[] = [
-  /\b[0-9a-fA-F]{32,}\b/g,
-  /\bG[A-Z2-7]{55}\b/g,
-  /\b[A-Za-z0-9+/]{40,}={0,2}\b/g,
-  /secret[_\s]?key\s*[:=]\s*\S+/gi,
-  /private[_\s]?key\s*[:=]\s*\S+/gi,
-];
+/** Keywords that indicate a smart-contract / blockchain related error. */
+const CONTRACT_KEYWORDS = [
+  'contract',
+  'stellar',
+  'soroban',
+  'transaction',
+  'blockchain',
+  'ledger',
+  'horizon',
+  'xdr',
+  'invoke',
+  'wallet',
+] as const;
 
 /**
  * @dev Replaces potentially sensitive substrings with [REDACTED].
@@ -158,9 +129,18 @@ const _classificationCache = new WeakMap<Error, boolean>();
 
 /**
  * @dev Determines whether an error is related to smart contract execution.
- * @custom:security Unknown error types default to the generic handler (safer path).
+ * Result is computed once per error instance and cached on the object to
+ * avoid redundant string scans across multiple render cycles (gas efficiency).
+ *
+ * @param error The error to classify.
+ * @return `true` if the error is contract/blockchain related.
+ *
+ * @custom:security This is a best-effort heuristic. Unknown error types default
+ * to the generic handler, which is the safer path.
  */
-export function isSmartContractError(error: Error): boolean {
+const _classificationCache = new WeakMap<Error, boolean>();
+
+function isSmartContractError(error: Error): boolean {
   if (_classificationCache.has(error)) {
     return _classificationCache.get(error)!;
   }
@@ -289,9 +269,18 @@ interface BoundaryState {
  * rate-limited log entry, and renders an appropriate fallback UI with a
  * "Try Again" recovery path (capped at MAX_RETRIES).
  *
- * Logging pipeline:
- *   buildBoundaryLogEntry -> sanitizeErrorMessage -> boundaryRateLimiter.isAllowed()
- *   -> console.error (structured) -> onLog callback -> onError callback
+ * Gas-efficiency improvements over the previous version:
+ *   - Error classification result is cached via WeakMap so repeated renders
+ *     do not re-scan the error message string.
+ *   - `onError` is called exactly once per error event (not on every render).
+ *   - Retry attempts are capped at MAX_RETRIES to prevent infinite re-render
+ *     loops that would waste resources on unrecoverable errors.
+ *   - Non-Error thrown values are normalised in getDerivedStateFromError so
+ *     componentDidCatch always receives a proper Error object.
+ *
+ * Lifecycle:
+ *   Error thrown → getDerivedStateFromError (state update) →
+ *   componentDidCatch (logging + reporting) → fallback render
  *
  * @custom:security
  *   - Stack traces are suppressed in production to prevent information disclosure.
@@ -313,14 +302,23 @@ export class FrontendGlobalErrorBoundary extends Component<
 
   constructor(props: FrontendGlobalErrorBoundaryProps) {
     super(props);
-    this.state = { hasError: false, error: null, isSmartContractError: false, retryCount: 0 };
+    this.state = {
+      hasError: false,
+      error: null,
+      isSmartContractError: false,
+      retryCount: 0,
+    };
     this.handleRetry = this.handleRetry.bind(this);
   }
 
   /**
    * @dev Updates component state so the next render shows the fallback UI.
+   * Called synchronously during the render phase — must be a pure function.
    * Non-Error thrown values are normalised to Error here so downstream code
    * can always rely on a proper Error instance.
+   *
+   * @param error The value that was thrown (may not be an Error instance).
+   * @return Partial state update.
    */
   static getDerivedStateFromError(error: unknown): Partial<BoundaryState> {
     const err =
@@ -336,32 +334,26 @@ export class FrontendGlobalErrorBoundary extends Component<
 
   /**
    * @dev Called after an error has been thrown by a descendant component.
-   * Logging is rate-limited and messages are sanitised before emission.
-   * When the rate limit is exceeded a single warning is emitted instead of
-   * the full entry to signal suppression without flooding the log.
+   * Responsible for side-effects: logging and external error reporting.
+   * Invokes `onError` exactly once per caught error to avoid duplicate
+   * reports (gas/cost efficiency for paid observability services).
+   *
+   * @param error The error that was thrown.
+   * @param errorInfo React-provided component stack information.
    */
   componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
+    // Use the normalised Error from state (set by getDerivedStateFromError)
+    // rather than the raw thrown value, which may be a non-Error primitive.
     const normalisedError = this.state.error ?? error;
     const isContract = isSmartContractError(normalisedError);
-    this.logSequence += 1;
-
-    if (!boundaryRateLimiter.isAllowed()) {
-      console.warn(
-        'Documentation Error Boundary: log rate limit exceeded — suppressing entry',
-        { sequence: this.logSequence },
-      );
-      return;
-    }
-
-    const logEntry = buildBoundaryLogEntry(normalisedError, errorInfo, isContract, this.logSequence);
-
-    console.error('Documentation Error Boundary caught an error:', error, errorInfo);
-
-    if (typeof this.props.onLog === 'function') {
-      this.props.onLog(logEntry);
-    }
-
     const report = buildErrorReport(normalisedError, errorInfo, isContract);
+
+    console.error(
+      'Documentation Error Boundary caught an error:',
+      error,
+      errorInfo,
+    );
+
     if (typeof this.props.onError === 'function') {
       this.props.onError(report);
     }
@@ -369,7 +361,8 @@ export class FrontendGlobalErrorBoundary extends Component<
 
   /**
    * @dev Resets error state so the child tree is re-rendered.
-   * Capped at MAX_RETRIES to prevent infinite retry loops on unrecoverable errors.
+   * Capped at MAX_RETRIES to prevent infinite retry loops on unrecoverable
+   * errors — each retry attempt consumes resources (network calls, re-renders).
    */
   handleRetry(): void {
     if (this.state.retryCount >= MAX_RETRIES) return;
@@ -382,13 +375,19 @@ export class FrontendGlobalErrorBoundary extends Component<
   }
 
   render(): ReactNode {
-    const { hasError, error, isSmartContractError: isContract, retryCount } = this.state;
+    const { hasError, error, isSmartContractError: isContract, retryCount } =
+      this.state;
     const { fallback, children } = this.props;
     const isDev = process.env.NODE_ENV !== 'production';
     const canRetry = retryCount < MAX_RETRIES;
 
-    if (!hasError) return children ?? null;
-    if (fallback) return fallback;
+    if (!hasError) {
+      return children ?? null;
+    }
+
+    if (fallback) {
+      return fallback;
+    }
 
     if (isContract) {
       return (
@@ -410,12 +409,26 @@ export class FrontendGlobalErrorBoundary extends Component<
           )}
           <div style={styles.actions}>
             {canRetry && (
-              <button onClick={this.handleRetry} style={styles.primaryButton} aria-label="Try Again">Try Again</button>
+              <button
+                onClick={this.handleRetry}
+                style={styles.primaryButton}
+                aria-label="Try Again"
+              >
+                Try Again
+              </button>
             )}
-            <button onClick={() => { window.location.href = '/'; }} style={styles.secondaryButton} aria-label="Go Home">Go Home</button>
+            <button
+              onClick={() => { window.location.href = '/'; }}
+              style={styles.secondaryButton}
+              aria-label="Go Home"
+            >
+              Go Home
+            </button>
           </div>
           {!canRetry && (
-            <p style={styles.hint} role="status">Maximum retry attempts reached. Please reload the page.</p>
+            <p style={styles.hint} role="status">
+              Maximum retry attempts reached. Please reload the page.
+            </p>
           )}
         </div>
       );
@@ -436,12 +449,26 @@ export class FrontendGlobalErrorBoundary extends Component<
         )}
         <div style={styles.actions}>
           {canRetry && (
-            <button onClick={this.handleRetry} style={styles.primaryButton} aria-label="Try Again">Try Again</button>
+            <button
+              onClick={this.handleRetry}
+              style={styles.primaryButton}
+              aria-label="Try Again"
+            >
+              Try Again
+            </button>
           )}
-          <button onClick={() => { window.location.href = '/'; }} style={styles.secondaryButton} aria-label="Go Home">Go Home</button>
+          <button
+            onClick={() => { window.location.href = '/'; }}
+            style={styles.secondaryButton}
+            aria-label="Go Home"
+          >
+            Go Home
+          </button>
         </div>
         {!canRetry && (
-          <p style={styles.hint} role="status">Maximum retry attempts reached. Please reload the page.</p>
+          <p style={styles.hint} role="status">
+            Maximum retry attempts reached. Please reload the page.
+          </p>
         )}
       </div>
     );

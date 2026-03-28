@@ -269,7 +269,7 @@ npm run test:coverage
 When an error occurs, users can:
 - **Retry**: Attempt to re-render the component (configurable max attempts)
 - **Reload**: Reload the entire page
-- **Dismiss**: Dismiss the error and try to continue (with warning)
+- **Dismiss**: Dismiss the error and try to continue — **dangerous**: does not resolve the underlying error; only offer this for known transient failures
 
 ## Accessibility
 

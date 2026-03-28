@@ -5,15 +5,8 @@ import {
   ContractError,
   NetworkError,
   TransactionError,
-  BoundaryRateLimiter,
-  boundaryRateLimiter,
-  sanitizeErrorMessage,
-  isSmartContractError,
-  buildBoundaryLogEntry,
-  buildErrorReport,
+  ErrorReport,
   MAX_RETRIES,
-  type ErrorReport,
-  type BoundaryLogEntry,
 } from './frontend_global_error';
 
 const originalConsoleError = console.error;
@@ -53,159 +46,6 @@ describe('Custom error classes', () => {
     const e = new TransactionError('rejected');
     expect(e.name).toBe('TransactionError');
     expect(e).toBeInstanceOf(Error);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// sanitizeErrorMessage
-// ---------------------------------------------------------------------------
-
-describe('sanitizeErrorMessage', () => {
-  it('returns non-string input as placeholder', () => {
-    expect(sanitizeErrorMessage(null as unknown as string)).toBe('[non-string error]');
-    expect(sanitizeErrorMessage(undefined as unknown as string)).toBe('[non-string error]');
-    expect(sanitizeErrorMessage(42 as unknown as string)).toBe('[non-string error]');
-  });
-  it('passes through a plain message unchanged', () => {
-    expect(sanitizeErrorMessage('contract call failed')).toBe('contract call failed');
-  });
-  it('redacts long hex strings (potential private keys)', () => {
-    const msg = 'key: abcdef1234567890abcdef1234567890 failed';
-    expect(sanitizeErrorMessage(msg)).toContain('[REDACTED]');
-    expect(sanitizeErrorMessage(msg)).not.toContain('abcdef1234567890abcdef1234567890');
-  });
-  it('redacts Stellar account IDs', () => {
-    const stellarId = 'G' + 'A'.repeat(55);
-    expect(sanitizeErrorMessage(`account ${stellarId} not found`)).toContain('[REDACTED]');
-  });
-  it('redacts secret_key patterns', () => {
-    expect(sanitizeErrorMessage('secret_key: mysecretvalue')).toContain('[REDACTED]');
-  });
-  it('redacts private_key patterns', () => {
-    expect(sanitizeErrorMessage('private_key: mysecretvalue')).toContain('[REDACTED]');
-  });
-  it('handles empty string without throwing', () => {
-    expect(sanitizeErrorMessage('')).toBe('');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// isSmartContractError
-// ---------------------------------------------------------------------------
-
-describe('isSmartContractError', () => {
-  it('returns true for ContractError', () => {
-    expect(isSmartContractError(new ContractError('x'))).toBe(true);
-  });
-  it('returns true for NetworkError', () => {
-    expect(isSmartContractError(new NetworkError('x'))).toBe(true);
-  });
-  it('returns true for TransactionError', () => {
-    expect(isSmartContractError(new TransactionError('x'))).toBe(true);
-  });
-  it('returns true for stellar keyword in message', () => {
-    expect(isSmartContractError(new Error('stellar network error'))).toBe(true);
-  });
-  it('returns true for soroban keyword', () => {
-    expect(isSmartContractError(new Error('soroban invocation failed'))).toBe(true);
-  });
-  it('returns true for xdr keyword', () => {
-    expect(isSmartContractError(new Error('xdr decode error'))).toBe(true);
-  });
-  it('returns true for invoke keyword', () => {
-    expect(isSmartContractError(new Error('invoke failed'))).toBe(true);
-  });
-  it('returns false for plain TypeError', () => {
-    expect(isSmartContractError(new TypeError('cannot read property'))).toBe(false);
-  });
-  it('returns false for generic error', () => {
-    expect(isSmartContractError(new Error('something went wrong'))).toBe(false);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// BoundaryRateLimiter
-// ---------------------------------------------------------------------------
-
-describe('BoundaryRateLimiter', () => {
-  it('allows entries up to the limit', () => {
-    const limiter = new BoundaryRateLimiter();
-    for (let i = 0; i < 10; i++) {
-      expect(limiter.isAllowed()).toBe(true);
-    }
-  });
-  it('blocks the 11th entry within the window', () => {
-    const limiter = new BoundaryRateLimiter();
-    for (let i = 0; i < 10; i++) limiter.isAllowed();
-    expect(limiter.isAllowed()).toBe(false);
-  });
-  it('reset() clears the window so entries are allowed again', () => {
-    const limiter = new BoundaryRateLimiter();
-    for (let i = 0; i < 10; i++) limiter.isAllowed();
-    limiter.reset();
-    expect(limiter.isAllowed()).toBe(true);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// buildBoundaryLogEntry
-// ---------------------------------------------------------------------------
-
-describe('buildBoundaryLogEntry', () => {
-  const fakeInfo = { componentStack: '\n  at Foo' } as React.ErrorInfo;
-
-  it('returns a log entry with correct shape', () => {
-    const entry: BoundaryLogEntry = buildBoundaryLogEntry(
-      new Error('test error'),
-      fakeInfo,
-      false,
-      1,
-    );
-    expect(entry.level).toBe('error');
-    expect(entry.errorName).toBe('Error');
-    expect(entry.isSmartContractError).toBe(false);
-    expect(entry.sequence).toBe(1);
-    expect(typeof entry.timestamp).toBe('string');
-  });
-  it('sets isSmartContractError=true for contract errors', () => {
-    const entry = buildBoundaryLogEntry(new ContractError('bad'), fakeInfo, true, 2);
-    expect(entry.isSmartContractError).toBe(true);
-    expect(entry.message).toContain('Smart contract');
-  });
-  it('sanitises the error message in the log entry', () => {
-    const entry = buildBoundaryLogEntry(
-      new Error('secret_key: abc123'),
-      fakeInfo,
-      false,
-      3,
-    );
-    expect(entry.errorMessage).toContain('[REDACTED]');
-    expect(entry.errorMessage).not.toContain('abc123');
-  });
-  it('includes componentStack in dev mode', () => {
-    const entry = buildBoundaryLogEntry(new Error('x'), fakeInfo, false, 4);
-    // NODE_ENV is 'test' (not 'production') so stacks should be present
-    expect(entry.componentStack).toBeDefined();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// buildErrorReport
-// ---------------------------------------------------------------------------
-
-describe('buildErrorReport', () => {
-  const fakeInfo = { componentStack: '\n  at Bar' } as React.ErrorInfo;
-
-  it('returns a report with correct fields', () => {
-    const report: ErrorReport = buildErrorReport(new Error('oops'), fakeInfo, false);
-    expect(report.message).toBe('oops');
-    expect(report.errorName).toBe('Error');
-    expect(report.isSmartContractError).toBe(false);
-    expect(typeof report.timestamp).toBe('string');
-  });
-  it('sets isSmartContractError=true for ContractError', () => {
-    const report = buildErrorReport(new ContractError('bad'), fakeInfo, true);
-    expect(report.isSmartContractError).toBe(true);
   });
 });
 
@@ -413,7 +253,135 @@ describe('Recovery via Try Again', () => {
 });
 
 // ---------------------------------------------------------------------------
-// onError callback
+// Retry cap (gas efficiency)
+// ---------------------------------------------------------------------------
+
+describe('Retry cap — gas efficiency', () => {
+  it('MAX_RETRIES is exported and is a positive integer', () => {
+    expect(typeof MAX_RETRIES).toBe('number');
+    expect(MAX_RETRIES).toBeGreaterThan(0);
+  });
+
+  it('hides Try Again button after MAX_RETRIES exhausted', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new Error('persistent')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    // Exhaust all retries
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      fireEvent.click(screen.getByRole('button', { name: 'Try Again' }));
+    }
+    expect(screen.queryByRole('button', { name: 'Try Again' })).toBeNull();
+  });
+
+  it('shows max-retry message after retries exhausted', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new Error('persistent')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      fireEvent.click(screen.getByRole('button', { name: 'Try Again' }));
+    }
+    expect(screen.getByText(/Maximum retry attempts reached/i)).toBeTruthy();
+  });
+
+  it('Go Home button remains visible after retries exhausted', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new Error('persistent')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      fireEvent.click(screen.getByRole('button', { name: 'Try Again' }));
+    }
+    expect(screen.getByRole('button', { name: 'Go Home' })).toBeTruthy();
+  });
+
+  it('retry cap applies to contract errors too', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new ContractError('persistent contract error')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      fireEvent.click(screen.getByRole('button', { name: 'Try Again' }));
+    }
+    expect(screen.queryByRole('button', { name: 'Try Again' })).toBeNull();
+    expect(screen.getByText(/Maximum retry attempts reached/i)).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Error classification caching (gas efficiency)
+// ---------------------------------------------------------------------------
+
+describe('Error classification caching', () => {
+  it('classifies the same error instance consistently across multiple renders', () => {
+    const err = new ContractError('cached');
+    const onError = jest.fn();
+    const { unmount } = render(
+      <FrontendGlobalErrorBoundary onError={onError}>
+        <Throw error={err} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(onError.mock.calls[0][0].isSmartContractError).toBe(true);
+    unmount();
+    // Re-render with same error instance — classification must be consistent
+    render(
+      <FrontendGlobalErrorBoundary onError={onError}>
+        <Throw error={err} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(onError.mock.calls[1][0].isSmartContractError).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Non-Error thrown values (reliability)
+// ---------------------------------------------------------------------------
+
+describe('Non-Error thrown values', () => {
+  it('handles a thrown string without crashing', () => {
+    const ThrowString = () => { throw 'string error'; };
+    expect(() =>
+      render(
+        <FrontendGlobalErrorBoundary>
+          <ThrowString />
+        </FrontendGlobalErrorBoundary>,
+      ),
+    ).not.toThrow();
+    expect(screen.getByRole('alert')).toBeTruthy();
+  });
+
+  it('handles a thrown null without crashing', () => {
+    const ThrowNull = () => { throw null; };
+    expect(() =>
+      render(
+        <FrontendGlobalErrorBoundary>
+          <ThrowNull />
+        </FrontendGlobalErrorBoundary>,
+      ),
+    ).not.toThrow();
+    expect(screen.getByRole('alert')).toBeTruthy();
+  });
+
+  it('handles a thrown number without crashing', () => {
+    const ThrowNumber = () => { throw 42; };
+    expect(() =>
+      render(
+        <FrontendGlobalErrorBoundary>
+          <ThrowNumber />
+        </FrontendGlobalErrorBoundary>,
+      ),
+    ).not.toThrow();
+    expect(screen.getByRole('alert')).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// onError callback — called exactly once per error (gas efficiency)
 // ---------------------------------------------------------------------------
 
 describe('onError callback', () => {
@@ -458,118 +426,14 @@ describe('onError callback', () => {
       ),
     ).not.toThrow();
   });
-});
-
-// ---------------------------------------------------------------------------
-// onLog callback (new logging infrastructure)
-// ---------------------------------------------------------------------------
-
-describe('onLog callback', () => {
-  it('calls onLog with a BoundaryLogEntry when an error is caught', () => {
-    const onLog = jest.fn();
-    render(
-      <FrontendGlobalErrorBoundary onLog={onLog}>
-        <Throw error={new Error('log test')} />
-      </FrontendGlobalErrorBoundary>,
-    );
-    expect(onLog).toHaveBeenCalledTimes(1);
-    const entry: BoundaryLogEntry = onLog.mock.calls[0][0];
-    expect(entry.level).toBe('error');
-    expect(entry.errorName).toBe('Error');
-    expect(entry.sequence).toBe(1);
-    expect(typeof entry.timestamp).toBe('string');
-    expect(typeof entry.isSmartContractError).toBe('boolean');
-  });
-  it('log entry has isSmartContractError=true for ContractError', () => {
-    const onLog = jest.fn();
-    render(
-      <FrontendGlobalErrorBoundary onLog={onLog}>
-        <Throw error={new ContractError('bad')} />
-      </FrontendGlobalErrorBoundary>,
-    );
-    expect(onLog.mock.calls[0][0].isSmartContractError).toBe(true);
-  });
-  it('log entry errorMessage is sanitised', () => {
-    const onLog = jest.fn();
-    render(
-      <FrontendGlobalErrorBoundary onLog={onLog}>
-        <Throw error={new Error('secret_key: mysecret')} />
-      </FrontendGlobalErrorBoundary>,
-    );
-    const entry: BoundaryLogEntry = onLog.mock.calls[0][0];
-    expect(entry.errorMessage).toContain('[REDACTED]');
-    expect(entry.errorMessage).not.toContain('mysecret');
-  });
-  it('sequence increments on each error', () => {
-    const onLog = jest.fn();
-    // First boundary instance — sequence 1
-    render(
-      <FrontendGlobalErrorBoundary onLog={onLog}>
-        <Throw error={new Error('first')} />
-      </FrontendGlobalErrorBoundary>,
-    );
-    expect(onLog.mock.calls[0][0].sequence).toBe(1);
-  });
-  it('does not throw if onLog is not provided', () => {
-    expect(() =>
-      render(
-        <FrontendGlobalErrorBoundary>
-          <Throw error={new Error('no log callback')} />
-        </FrontendGlobalErrorBoundary>,
-      ),
-    ).not.toThrow();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Rate limiting
-// ---------------------------------------------------------------------------
-
-describe('Rate limiting', () => {
-  it('emits console.warn when rate limit is exceeded', () => {
-    // Exhaust the shared rate limiter
-    for (let i = 0; i < 10; i++) boundaryRateLimiter.isAllowed();
-
-    render(
-      <FrontendGlobalErrorBoundary>
-        <Throw error={new Error('rate limited')} />
-      </FrontendGlobalErrorBoundary>,
-    );
-    expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining('rate limit exceeded'),
-      expect.objectContaining({ sequence: expect.any(Number) }),
-    );
-  });
-  it('does NOT call onLog when rate limit is exceeded', () => {
-    for (let i = 0; i < 10; i++) boundaryRateLimiter.isAllowed();
-    const onLog = jest.fn();
-    render(
-      <FrontendGlobalErrorBoundary onLog={onLog}>
-        <Throw error={new Error('rate limited')} />
-      </FrontendGlobalErrorBoundary>,
-    );
-    expect(onLog).not.toHaveBeenCalled();
-  });
-  it('does NOT call onError when rate limit is exceeded', () => {
-    for (let i = 0; i < 10; i++) boundaryRateLimiter.isAllowed();
+  it('onError is called exactly once per error event, not on every render', () => {
     const onError = jest.fn();
     render(
       <FrontendGlobalErrorBoundary onError={onError}>
-        <Throw error={new Error('rate limited')} />
+        <Throw error={new Error('once')} />
       </FrontendGlobalErrorBoundary>,
     );
-    expect(onError).not.toHaveBeenCalled();
-  });
-  it('allows logging again after reset', () => {
-    for (let i = 0; i < 10; i++) boundaryRateLimiter.isAllowed();
-    boundaryRateLimiter.reset();
-    const onLog = jest.fn();
-    render(
-      <FrontendGlobalErrorBoundary onLog={onLog}>
-        <Throw error={new Error('after reset')} />
-      </FrontendGlobalErrorBoundary>,
-    );
-    expect(onLog).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -609,6 +473,17 @@ describe('Accessibility', () => {
       </FrontendGlobalErrorBoundary>,
     );
     expect(container.querySelector('[aria-hidden="true"]')).toBeTruthy();
+  });
+  it('max-retry status message has role="status"', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new Error('persistent')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      fireEvent.click(screen.getByRole('button', { name: 'Try Again' }));
+    }
+    expect(screen.getByRole('status')).toBeTruthy();
   });
 });
 
@@ -661,5 +536,85 @@ describe('Error classification edge cases', () => {
       ),
     ).not.toThrow();
     expect(screen.getByRole('alert')).toBeTruthy();
+  });
+  it('classifies ledger keyword as contract error', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new Error('ledger sequence mismatch')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(screen.getByText('Smart Contract Error')).toBeTruthy();
+  });
+});
+
+// ── Documentation accuracy tests ─────────────────────────────────────────────
+// These tests verify that the rendered UI matches what the documentation
+// describes, catching doc/code mismatches early.
+
+describe('Documentation accuracy', () => {
+  it('generic fallback title is "Documentation Loading Error" (not "Something went wrong")', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new TypeError('cannot read property x')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(screen.getByText('Documentation Loading Error')).toBeTruthy();
+    expect(screen.queryByText('Something went wrong')).toBeNull();
+  });
+
+  it('smart contract fallback title is "Smart Contract Error"', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new ContractError('bad call')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(screen.getByText('Smart Contract Error')).toBeTruthy();
+  });
+
+  it('generic fallback shows warning icon ⚠️', () => {
+    const { container } = render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new Error('generic')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(container.textContent).toContain('⚠️');
+  });
+
+  it('smart contract fallback shows link icon 🔗', () => {
+    const { container } = render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new ContractError('bad')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(container.textContent).toContain('🔗');
+  });
+
+  it('generic fallback has "Try Again" and "Go Home" buttons as documented', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new Error('generic')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(screen.getByRole('button', { name: 'Try Again' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Go Home' })).toBeTruthy();
+  });
+
+  it('smart contract fallback has "Try Again" and "Go Home" buttons as documented', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new ContractError('bad')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(screen.getByRole('button', { name: 'Try Again' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Go Home' })).toBeTruthy();
+  });
+
+  it('smart contract fallback shows wallet balance guidance as documented', () => {
+    render(
+      <FrontendGlobalErrorBoundary>
+        <Throw error={new ContractError('insufficient funds')} />
+      </FrontendGlobalErrorBoundary>,
+    );
+    expect(screen.getByText(/Check your wallet balance/i)).toBeTruthy();
   });
 });

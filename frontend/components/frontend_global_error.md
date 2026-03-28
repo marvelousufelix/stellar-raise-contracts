@@ -117,13 +117,18 @@ import { boundaryRateLimiter } from '../components/frontend_global_error';
 beforeEach(() => boundaryRateLimiter.reset());
 ```
 
-### Structured log entry
+For other errors:
+- ⚠️ Warning icon
+- "Documentation Loading Error" title
+- General error message
+- Standard recovery options
 
 `buildBoundaryLogEntry` produces a plain serialisable object safe to forward to any log aggregator:
 
-```ts
-import { buildBoundaryLogEntry } from '../components/frontend_global_error';
-```
+- **Try Again**: Resets error state and re-renders children
+- **Go Home**: Navigates to home page
+- **Dismiss**: Resets error state without resolving the underlying issue — use only for transient errors
+- **Error Details**: Expandable section in development mode
 
 ---
 
