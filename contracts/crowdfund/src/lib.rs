@@ -28,7 +28,7 @@ pub mod security_compliance_automation;
 pub mod security_analytics;
 pub mod batch_processing_optimization;
 
-// ── Imports from modules ──────────────────────────────────────────────────────
+pub mod parallel
 
 use crowdfund_initialize_function::{execute_initialize, InitParams};
 use refund_single_token::{
