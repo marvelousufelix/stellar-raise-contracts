@@ -10,6 +10,7 @@ pub mod access_control;
 pub mod admin_upgrade_mechanism;
 pub mod dependency_vulnerability_scanning;
 pub mod pause_mechanism;
+pub mod sharding_mechanism;
 pub mod algorithm_optimization;
 pub mod session_management;
 pub mod campaign_goal_minimum;
@@ -59,6 +60,9 @@ mod dependency_vulnerability_scanning_test;
 #[cfg(test)]
 #[path = "pause_mechanism.test.rs"]
 mod pause_mechanism_test;
+#[cfg(test)]
+#[path = "sharding_mechanism.test.rs"]
+mod sharding_mechanism_test;
 #[cfg(test)]
 mod auth_tests;
 #[cfg(test)]
@@ -252,6 +256,12 @@ pub enum DataKey {
     SecurityMetric(Address, MetricType),
     /// Global security metric storage keyed by metric type.
     GlobalSecurityMetric(MetricType),
+
+    // ── Sharding keys ───────────────────────────────────────────────────────
+    /// Number of contributor shards currently allocated.
+    ShardCount,
+    /// Contributor address list for shard index `n`.
+    ContributorShard(u32),
 }
 
 // ── Contract Error ──────────────────────────────────────────────────────────
