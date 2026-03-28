@@ -375,6 +375,15 @@ _test_die_json_error() {
 }
 assert_exit "die writes step_error JSON with exit_code and step" 0 _test_die_json_error
 
+_test_emit_event_unwritable_log() {
+  bash -c "$(declare -f emit_event log)
+           DEPLOY_JSON_LOG=/nonexistent_dir/events.json; NETWORK=testnet; EXIT_LOG_FAIL=7
+           emit_event step_ok build 'test'" &>/dev/null
+  local rc=$?
+  [[ $rc -eq 7 ]]
+}
+assert_exit "emit_event exits 7 when DEPLOY_JSON_LOG is not writable" 0 _test_emit_event_unwritable_log
+
 _test_deploy_complete_event() {
   local lib; lib=$(make_lib)
   local tlog; tlog=$(mktemp); TMPDIRS+=("$tlog")

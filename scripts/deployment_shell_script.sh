@@ -98,6 +98,18 @@ log() {
   }
 }
 
+# @notice Sanitises a string by replacing known sensitive patterns with [REDACTED].
+# @param  $1  raw string
+# @return sanitised string on stdout
+# @custom:security Applied to all user-supplied values before JSON emission.
+sanitize() {
+  local s="$1"
+  for pat in "${SENSITIVE_PATTERNS[@]}"; do
+    s="$(echo "$s" | sed -E "s/$pat/[REDACTED]/g")"
+  done
+  echo "$s"
+}
+
 # @notice Appends one NDJSON event line to DEPLOY_JSON_LOG.
 #         The frontend UI stream-parses this file to render live step status.
 #         All user-supplied strings are sanitised before embedding in JSON:
@@ -328,6 +340,8 @@ deploy_contract() {
 # @param  $4  goal
 # @param  $5  deadline
 # @param  $6  min_contribution
+# @custom:edge Emits a structured retry_hint event when init fails so the
+#              frontend UI can suggest the user re-run with --skip-build.
 init_contract() {
   local contract_id="$1" creator="$2" token="$3" \
         goal="$4" deadline="$5" min_contribution="$6"

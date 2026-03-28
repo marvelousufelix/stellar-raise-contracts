@@ -105,7 +105,7 @@ The frontend streams this file to display live progress and typed errors.
 ```json
 {
   "event":     "step_start | step_ok | step_error | deploy_complete",
-  "step":      "validate | network_check | build | deploy | init | done",
+  "step":      "validate | network_check | build | wasm_integrity | deploy | init | signal | done",
   "message":   "Human-readable description",
   "timestamp": "2026-03-28T00:00:00Z",
   "network":   "testnet"
