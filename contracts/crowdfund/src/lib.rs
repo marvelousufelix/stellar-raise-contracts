@@ -8,6 +8,8 @@ use soroban_sdk::{
 
 pub mod access_control;
 pub mod admin_upgrade_mechanism;
+pub mod algorithm_optimization;
+pub mod session_management;
 pub mod campaign_goal_minimum;
 pub mod cargo_toml_rust;
 pub mod contract_state_size;
@@ -22,11 +24,15 @@ pub mod soroban_sdk_minor;
 pub mod stellar_token_minter;
 pub mod stream_processing_optimization;
 pub mod withdraw_event_emission;
+pub mod loop_optimization;
 pub mod security_compliance_automation;
 pub mod security_analytics;
 pub mod conditional_optimization;
+pub mod batch_processing_optimization;
 
-// ── Imports from modules ──────────────────────────────────────────────────────
+pub mod parallel
+
+use crate::reentrancy_guard::{enter_transfer, exit_transfer, protected_transfer};
 
 use crowdfund_initialize_function::{execute_initialize, InitParams};
 use refund_single_token::{
@@ -92,6 +98,8 @@ mod security_analytics_test;
 #[cfg(test)]
 #[path = "conditional_optimization.test.rs"]
 mod conditional_optimization_test;
+#[path = "batch_processing_optimization.test.rs"]
+mod batch_processing_optimization_test;
 
 // --- Constants ---
 const CONTRACT_VERSION: u32 = 3;
@@ -723,20 +731,30 @@ impl CrowdfundContract {
             );
             total.checked_sub(fee).expect("creator payout underflow")
         } else {
-            total
+            0
         };
 
-        token_client.transfer(&env.current_contract_address(), &creator, &creator_payout);
+        protected_transfer(&env, || {
+            // Platform fee transfer + emit (if applicable)
+            if let Some(config) = platform_config {
+                token_client.transfer(&env.current_contract_address(), &config.address, &creator_payout);
+                withdraw_event_emission::emit_fee_transferred(&env, &config.address, creator_payout, config.fee_bps);
+            }
 
+            // Creator payout transfer
+            let final_creator_payout = total.checked_sub(creator_payout).expect("creator payout underflow");
+            token_client.transfer(&env.current_contract_address(), &creator, &final_creator_payout);
+
+            // Bounded NFT minting
+            let nft_contract: Option<Address> = env.storage().instance().get(&DataKey::NFTContract);
+            let nft_minted_count = mint_nfts_in_batch(&env, &nft_contract);
+
+            // Emit withdrawal event
+            emit_withdrawn(&env, &creator, final_creator_payout, nft_minted_count);
+        });
+
+        // Clear TotalRaised AFTER transfers (CEI compliance)
         env.storage().instance().set(&DataKey::TotalRaised, &0i128);
-
-        // Bounded NFT minting: process at most MAX_NFT_MINT_BATCH contributors
-        // per withdraw() call to cap event emission and gas consumption.
-        let nft_contract: Option<Address> = env.storage().instance().get(&DataKey::NFTContract);
-        let nft_minted_count = mint_nfts_in_batch(&env, &nft_contract);
-
-        // Single withdrawal event carrying payout and mint count.
-        emit_withdrawn(&env, &creator, creator_payout, nft_minted_count);
 
         Ok(())
     }
@@ -753,7 +771,10 @@ impl CrowdfundContract {
     pub fn refund_single(env: Env, contributor: Address) -> Result<(), ContractError> {
         contributor.require_auth();
         let amount = validate_refund_preconditions(&env, &contributor)?;
-        execute_refund_single(&env, &contributor, amount)
+        protected_transfer(&env, || {
+            execute_refund_single(&env, &contributor, amount)
+        });
+        Ok(())
     }
 
     /// Check if a refund is available for the given contributor.

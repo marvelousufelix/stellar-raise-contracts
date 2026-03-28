@@ -152,7 +152,7 @@ function isSmartContractError(error: Error): boolean {
   ) {
     result = true;
   } else {
-    const haystack = `${error.name} ${error.message}`.toLowerCase();
+    const haystack = boundedClassificationHaystack(error);
     result = CONTRACT_KEYWORDS.some((kw) => haystack.includes(kw));
   }
   _classificationCache.set(error, result);
@@ -211,12 +211,21 @@ export function buildErrorReport(
 ): ErrorReport {
   const isDev = process.env.NODE_ENV !== 'production';
   return {
-    message: error.message,
-    stack: isDev ? error.stack : undefined,
-    componentStack: isDev ? errorInfo.componentStack : undefined,
+    message: truncateForBounds(error.message, MAX_REPORT_MESSAGE_CHARS),
+    stack:
+      isDev && error.stack
+        ? truncateForBounds(error.stack, MAX_REPORT_STACK_CHARS)
+        : undefined,
+    componentStack:
+      isDev && errorInfo.componentStack
+        ? truncateForBounds(
+            errorInfo.componentStack,
+            MAX_REPORT_COMPONENT_STACK_CHARS,
+          )
+        : undefined,
     timestamp: new Date().toISOString(),
     isSmartContractError: isContract,
-    errorName: error.name,
+    errorName: truncateForBounds(error.name, MAX_ERROR_NAME_CHARS),
   };
 }
 
@@ -277,6 +286,8 @@ interface BoundaryState {
  *     loops that would waste resources on unrecoverable errors.
  *   - Non-Error thrown values are normalised in getDerivedStateFromError so
  *     componentDidCatch always receives a proper Error object.
+ *   - Logging bounds (`truncateForBounds`, `MAX_*` constants) cap classification,
+ *     reports, and dev UI text so scripts and observability pipelines stay predictable.
  *
  * Lifecycle:
  *   Error thrown → getDerivedStateFromError (state update) →
@@ -324,7 +335,14 @@ export class FrontendGlobalErrorBoundary extends Component<
     const err =
       error instanceof Error
         ? error
-        : new Error(error != null ? String(error) : 'An unexpected error occurred');
+        : new Error(
+            error != null
+              ? truncateForBounds(
+                  String(error),
+                  MAX_THROWN_VALUE_STRING_CHARS,
+                )
+              : 'An unexpected error occurred',
+          );
     return {
       hasError: true,
       error: err,
@@ -404,7 +422,9 @@ export class FrontendGlobalErrorBoundary extends Component<
           {isDev && error && (
             <details style={styles.details}>
               <summary>Error Details (dev only)</summary>
-              <pre style={styles.pre}>{error.message}</pre>
+              <pre style={styles.pre}>
+                {truncateForBounds(error.message, MAX_DISPLAY_MESSAGE_CHARS)}
+              </pre>
             </details>
           )}
           <div style={styles.actions}>
@@ -444,7 +464,9 @@ export class FrontendGlobalErrorBoundary extends Component<
         {isDev && error && (
           <details style={styles.details}>
             <summary>Error Details (dev only)</summary>
-            <pre style={styles.pre}>{error.message}</pre>
+            <pre style={styles.pre}>
+              {truncateForBounds(error.message, MAX_DISPLAY_MESSAGE_CHARS)}
+            </pre>
           </details>
         )}
         <div style={styles.actions}>
