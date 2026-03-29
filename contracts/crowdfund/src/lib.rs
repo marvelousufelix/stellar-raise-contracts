@@ -8,6 +8,10 @@ use soroban_sdk::{
 
 pub mod access_control;
 pub mod admin_upgrade_mechanism;
+pub mod dependency_vulnerability_scanning;
+pub mod emergency_stop;
+pub mod pause_mechanism;
+pub mod sharding_mechanism;
 pub mod algorithm_optimization;
 pub mod session_management;
 pub mod campaign_goal_minimum;
@@ -26,11 +30,15 @@ pub mod stream_processing_optimization;
 pub mod withdraw_event_emission;
 pub mod loop_optimization;
 pub mod security_compliance_automation;
+pub mod security_compliance_testing;
+pub mod security_compliance_validation;
 pub mod security_analytics;
 pub mod conditional_optimization;
 pub mod batch_processing_optimization;
-
-pub mod parallel
+pub mod state_compression;
+pub mod optimistic_execution;
+pub mod security_incident_response;
+pub mod data_availability_layer;
 
 use crate::reentrancy_guard::{enter_transfer, exit_transfer, protected_transfer};
 
@@ -51,6 +59,18 @@ mod access_control_tests;
 #[cfg(test)]
 #[path = "admin_upgrade_mechanism.test.rs"]
 mod admin_upgrade_mechanism_test;
+#[cfg(test)]
+#[path = "dependency_vulnerability_scanning.test.rs"]
+mod dependency_vulnerability_scanning_test;
+#[cfg(test)]
+#[path = "emergency_stop.test.rs"]
+mod emergency_stop_test;
+#[cfg(test)]
+#[path = "pause_mechanism.test.rs"]
+mod pause_mechanism_test;
+#[cfg(test)]
+#[path = "sharding_mechanism.test.rs"]
+mod sharding_mechanism_test;
 #[cfg(test)]
 mod auth_tests;
 #[cfg(test)]
@@ -90,6 +110,12 @@ mod stream_processing_optimization_test;
 #[path = "security_compliance_automation.test.rs"]
 mod security_compliance_automation_test;
 #[cfg(test)]
+#[path = "security_compliance_testing.test.rs"]
+mod security_compliance_testing_test;
+#[cfg(test)]
+#[path = "security_compliance_validation.test.rs"]
+mod security_compliance_validation_test;
+#[cfg(test)]
 #[path = "role_based_access.test.rs"]
 mod role_based_access_test;
 #[cfg(test)]
@@ -100,6 +126,24 @@ mod security_analytics_test;
 mod conditional_optimization_test;
 #[path = "batch_processing_optimization.test.rs"]
 mod batch_processing_optimization_test;
+#[cfg(test)]
+#[path = "optimistic_execution.test.rs"]
+mod optimistic_execution_test;
+#[cfg(test)]
+#[path = "state_compression.test.rs"]
+mod state_compression_test;
+#[cfg(test)]
+#[path = "computation_optimization.test.rs"]
+mod computation_optimization_test;
+#[cfg(test)]
+#[path = "withdraw_event_emission.test.rs"]
+mod withdraw_event_emission_test_new;
+#[cfg(test)]
+#[path = "security_incident_response.test.rs"]
+mod security_incident_response_test;
+#[cfg(test)]
+#[path = "data_availability_layer.test.rs"]
+mod data_availability_layer_test;
 
 // --- Constants ---
 const CONTRACT_VERSION: u32 = 3;
@@ -244,6 +288,16 @@ pub enum DataKey {
     SecurityMetric(Address, MetricType),
     /// Global security metric storage keyed by metric type.
     GlobalSecurityMetric(MetricType),
+
+    // ── Sharding keys ───────────────────────────────────────────────────────
+    /// Number of contributor shards currently allocated.
+    ShardCount,
+    /// Contributor address list for shard index `n`.
+    ContributorShard(u32),
+
+    // ── Emergency stop key ──────────────────────────────────────────────────
+    /// Boolean flag — when true, all state-mutating entry points are permanently blocked.
+    EmergencyStopped,
 }
 
 // ── Contract Error ──────────────────────────────────────────────────────────
@@ -377,6 +431,11 @@ impl CrowdfundContract {
     /// after the deadline has passed or if the campaign is not active.
     pub fn contribute(env: Env, contributor: Address, amount: i128) -> Result<(), ContractError> {
         contributor.require_auth();
+
+        // Guard: reject if emergency stop is active.
+        emergency_stop::assert_not_stopped(&env);
+        // Guard: reject if contract is paused.
+        pause_mechanism::assert_not_paused(&env);
 
         // Guard: campaign must be active.
         let status: Status = env.storage().instance().get(&DataKey::Status).unwrap();
@@ -701,6 +760,11 @@ impl CrowdfundContract {
     /// If a platform fee is configured, deducts the fee and transfers it to
     /// the platform address, then sends the remainder to the creator.
     pub fn withdraw(env: Env) -> Result<(), ContractError> {
+        // Guard: reject if emergency stop is active.
+        emergency_stop::assert_not_stopped(&env);
+        // Guard: reject if contract is paused.
+        pause_mechanism::assert_not_paused(&env);
+
         let status: Status = env.storage().instance().get(&DataKey::Status).unwrap();
         if status != Status::Succeeded {
             panic!("campaign must be in Succeeded state to withdraw");
@@ -716,7 +780,7 @@ impl CrowdfundContract {
         let platform_config: Option<PlatformConfig> =
             env.storage().instance().get(&DataKey::PlatformConfig);
 
-        let creator_payout = if let Some(config) = platform_config {
+        let creator_payout = if let Some(config) = &platform_config {
             let fee = total
                 .checked_mul(config.fee_bps as i128)
                 .expect("fee calculation overflow")
@@ -728,29 +792,23 @@ impl CrowdfundContract {
                 &env,
                 &config.address,
                 fee,
+                config.fee_bps,
             );
             total.checked_sub(fee).expect("creator payout underflow")
         } else {
-            0
+            total
         };
 
         protected_transfer(&env, || {
-            // Platform fee transfer + emit (if applicable)
-            if let Some(config) = platform_config {
-                token_client.transfer(&env.current_contract_address(), &config.address, &creator_payout);
-                withdraw_event_emission::emit_fee_transferred(&env, &config.address, creator_payout, config.fee_bps);
-            }
-
             // Creator payout transfer
-            let final_creator_payout = total.checked_sub(creator_payout).expect("creator payout underflow");
-            token_client.transfer(&env.current_contract_address(), &creator, &final_creator_payout);
+            token_client.transfer(&env.current_contract_address(), &creator, &creator_payout);
 
             // Bounded NFT minting
             let nft_contract: Option<Address> = env.storage().instance().get(&DataKey::NFTContract);
             let nft_minted_count = mint_nfts_in_batch(&env, &nft_contract);
 
             // Emit withdrawal event
-            emit_withdrawn(&env, &creator, final_creator_payout, nft_minted_count);
+            emit_withdrawn(&env, &creator, creator_payout, nft_minted_count);
         });
 
         // Clear TotalRaised AFTER transfers (CEI compliance)
@@ -861,6 +919,57 @@ impl CrowdfundContract {
             (soroban_sdk::Symbol::new(&env, "upgrade"), admin),
             new_wasm_hash,
         );
+    }
+
+    /// @notice Pause the contract — blocks `contribute()` and `withdraw()`.
+    /// @dev    Callable by `PAUSER_ROLE` or `DEFAULT_ADMIN_ROLE`.
+    ///         Emits `(access, paused)` event.
+    ///
+    /// # Arguments
+    /// * `caller` — Must hold `PAUSER_ROLE` or `DEFAULT_ADMIN_ROLE`.
+    ///
+    /// # Panics
+    /// * `"not authorized to pause"` if `caller` holds neither role.
+    pub fn pause(env: Env, caller: Address) {
+        pause_mechanism::pause(&env, &caller);
+    }
+
+    /// @notice Unpause the contract — re-enables `contribute()` and `withdraw()`.
+    /// @dev    Only `DEFAULT_ADMIN_ROLE` may unpause (asymmetric by design).
+    ///         Emits `(access, unpaused)` event.
+    ///
+    /// # Arguments
+    /// * `caller` — Must be `DEFAULT_ADMIN_ROLE`.
+    ///
+    /// # Panics
+    /// * `"only DEFAULT_ADMIN_ROLE can unpause"` if `caller` is not the admin.
+    pub fn unpause(env: Env, caller: Address) {
+        pause_mechanism::unpause(&env, &caller);
+    }
+
+    /// @notice Returns `true` if the contract is currently paused.
+    pub fn paused(env: Env) -> bool {
+        pause_mechanism::is_paused(&env)
+    }
+
+    /// @notice Permanently stop the contract — irreversible.
+    /// @dev    Only `DEFAULT_ADMIN_ROLE` may call this.
+    ///         Sets campaign status to `Cancelled` so contributors can refund.
+    ///         Emits `(emergency, stopped)` event.
+    ///
+    /// # Arguments
+    /// * `caller` — Must be `DEFAULT_ADMIN_ROLE`.
+    ///
+    /// # Panics
+    /// * `"only DEFAULT_ADMIN_ROLE can trigger emergency stop"` if not admin.
+    /// * `"already stopped"` if already triggered.
+    pub fn emergency_stop(env: Env, caller: Address) {
+        emergency_stop::trigger(&env, &caller);
+    }
+
+    /// @notice Returns `true` if the emergency stop has been triggered.
+    pub fn is_stopped(env: Env) -> bool {
+        emergency_stop::is_stopped(&env)
     }
 
     /// Update campaign metadata — only callable by the creator while the
