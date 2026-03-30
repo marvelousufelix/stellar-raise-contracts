@@ -45,7 +45,152 @@ export class TransactionError extends Error {
 }
 
 // ---------------------------------------------------------------------------
+// Bounds constants
+// ---------------------------------------------------------------------------
+
+/** Maximum characters allowed in a sanitised error message forwarded to logs. */
+export const MAX_REPORT_MESSAGE_CHARS = 500;
+/** Maximum characters allowed in a stack trace forwarded to logs. */
+export const MAX_REPORT_STACK_CHARS = 2000;
+/** Maximum characters allowed in a component stack forwarded to logs. */
+export const MAX_REPORT_COMPONENT_STACK_CHARS = 2000;
+/** Maximum characters allowed in an error name field. */
+export const MAX_ERROR_NAME_CHARS = 100;
+/** Maximum characters shown in the dev-only fallback UI details panel. */
+export const MAX_DISPLAY_MESSAGE_CHARS = 300;
+/** Maximum characters used when stringifying a non-Error thrown value. */
+export const MAX_THROWN_VALUE_STRING_CHARS = 200;
+/** Maximum characters used when building the classification haystack. */
+export const MAX_CLASSIFICATION_HAYSTACK_CHARS = 300;
+/** Alias for MAX_CLASSIFICATION_HAYSTACK_CHARS for test compatibility. */
+export const MAX_CLASSIFICATION_INPUT_CHARS = 300;
+/** Maximum number of retry attempts before the retry button is hidden. */
+export const MAX_RETRIES = 3;
+
+/**
+ * @dev Truncates a string to at most `max` characters, appending '…' when cut.
+ * Prevents unbounded strings from flowing into logs or the UI.
+ */
+export function truncateForBounds(value: string, max: number): string {
+  if (typeof value !== 'string') return '';
+  return value.length <= max ? value : `${value.slice(0, max)}…`;
+}
+
+// ---------------------------------------------------------------------------
 // Logging infrastructure
+// ---------------------------------------------------------------------------
+
+/**
+ * @dev Regex patterns used to redact potentially sensitive substrings from
+ * error messages before they are forwarded to log aggregators.
+ *
+ * @custom:security Conservative by design — may redact non-sensitive content
+ * that matches patterns. False negatives (leaking secrets) are not acceptable.
+ */
+const SENSITIVE_PATTERNS: RegExp[] = [
+  /S[0-9A-Z]{55}/g,                          // Stellar secret keys (S…)
+  /[0-9a-fA-F]{64}/g,                        // 32-byte hex strings (private keys)
+  /(?:secret|private[_\s]?key|mnemonic|seed)[=:\s]+\S+/gi, // labelled secrets
+];
+
+/**
+ * @dev Replaces potentially sensitive substrings with [REDACTED].
+ * The original error object is never mutated.
+ */
+export function sanitizeErrorMessage(message: string): string {
+  if (typeof message !== 'string') return '[non-string error]';
+  let sanitized = message;
+  for (const pattern of SENSITIVE_PATTERNS) {
+    sanitized = sanitized.replace(pattern, '[REDACTED]');
+  }
+  return sanitized;
+}
+
+// ---------------------------------------------------------------------------
+// Rate limiting
+// ---------------------------------------------------------------------------
+
+/** Maximum log entries allowed per sliding window. */
+export const LOG_RATE_LIMIT = 5;
+/** Sliding window duration in milliseconds. */
+export const LOG_RATE_WINDOW_MS = 60_000;
+
+/**
+ * @dev Internal state for the rate limiter.
+ *
+ * @custom:security This is exported for test introspection only.
+ * Production code should use shouldLog() and _resetLogState().
+ */
+export const _logState = {
+  windowStart: 0,
+  count: 0,
+};
+
+/**
+ * @dev Resets the log rate limiter state. For testing only.
+ * @custom:security Never call this in production code.
+ */
+export function _resetLogState(): void {
+  _logState.windowStart = 0;
+  _logState.count = 0;
+}
+
+/**
+ * @dev Checks if a log entry is allowed under the current rate limit using
+ * a fixed-window counting strategy.
+ *
+ * @param now Optional current timestamp (defaults to Date.now()). Used in tests
+ *            to simulate time progression without actual delays.
+ * @return true if a log entry is allowed under the current rate limit.
+ *
+ * @custom:security Bounding log output prevents:
+ *   - Denial-of-service via log exhaustion attacks
+ *   - Exponential growth of sensitive data in high-volume log streams
+ *   - Resource exhaustion on logging infrastructure (disk, network, CPU)
+ */
+export function shouldLog(now: number = Date.now()): boolean {
+  // If the current time is outside the window, start a new window.
+  if (now - _logState.windowStart >= LOG_RATE_WINDOW_MS) {
+    _logState.windowStart = now;
+    _logState.count = 0;
+  }
+
+  // If we've hit the limit, reject this log entry.
+  if (_logState.count >= LOG_RATE_LIMIT) {
+    return false;
+  }
+
+  // Increment the count and allow this entry.
+  _logState.count += 1;
+  return true;
+}
+
+/**
+ * @dev Lightweight sliding-window rate limiter for boundary log entries.
+ * Shared across all boundary instances so nested boundaries cannot
+ * collectively bypass the limit.
+ *
+ * @custom:security Bounding log output limits denial-of-service via log
+ * exhaustion and reduces the risk of sensitive data appearing in high-volume
+ * log streams.
+ */
+export class BoundaryRateLimiter {
+  /** @return true if a log entry is allowed under the current rate limit. */
+  isAllowed(): boolean {
+    return shouldLog();
+  }
+
+  /** Resets the limiter — use in tests to ensure isolation. */
+  reset(): void {
+    _resetLogState();
+  }
+}
+
+/** Module-level singleton rate limiter shared across all boundary instances. */
+export const boundaryRateLimiter = new BoundaryRateLimiter();
+
+// ---------------------------------------------------------------------------
+// Error classification
 // ---------------------------------------------------------------------------
 
 /** Keywords that indicate a smart-contract / blockchain related error. */
@@ -63,74 +208,26 @@ const CONTRACT_KEYWORDS = [
 ] as const;
 
 /**
- * @dev Replaces potentially sensitive substrings with [REDACTED].
- * The original error object is never mutated.
- * @custom:security Conservative by design — may redact non-sensitive content
- * that matches patterns. False negatives (leaking secrets) are not acceptable.
- */
-export function sanitizeErrorMessage(message: string): string {
-  if (typeof message !== 'string') return '[non-string error]';
-  let sanitized = message;
-  for (const pattern of SENSITIVE_PATTERNS) {
-    sanitized = sanitized.replace(pattern, '[REDACTED]');
-  }
-  return sanitized;
-}
-
-// ---------------------------------------------------------------------------
-// Rate limiting
-// ---------------------------------------------------------------------------
-
-/** Maximum log entries allowed per sliding window. */
-const LOG_RATE_LIMIT = 10;
-/** Sliding window duration in milliseconds. */
-const LOG_RATE_WINDOW_MS = 60_000;
-
-/**
- * @dev Lightweight token-bucket rate limiter for boundary log entries.
- * Shared across all boundary instances so nested boundaries cannot
- * collectively bypass the limit.
- */
-export class BoundaryRateLimiter {
-  private timestamps: number[] = [];
-
-  /** @return true if a log entry is allowed under the current rate limit. */
-  isAllowed(): boolean {
-    const now = Date.now();
-    this.timestamps = this.timestamps.filter((t) => now - t < LOG_RATE_WINDOW_MS);
-    if (this.timestamps.length >= LOG_RATE_LIMIT) return false;
-    this.timestamps.push(now);
-    return true;
-  }
-
-  /** Resets the limiter — use in tests to ensure isolation. */
-  reset(): void {
-    this.timestamps = [];
-  }
-}
-
-/** Module-level singleton rate limiter. */
-export const boundaryRateLimiter = new BoundaryRateLimiter();
-
-// ---------------------------------------------------------------------------
-// Error classification
-// ---------------------------------------------------------------------------
-
-const CONTRACT_KEYWORDS = [
-  'contract', 'stellar', 'soroban', 'transaction',
-  'blockchain', 'ledger', 'horizon', 'xdr', 'invoke', 'wallet',
-] as const;
-
-/**
  * @dev Classification result is cached via WeakMap so repeated renders
- * do not re-scan the error message string (gas/CPU efficiency).
+ * do not re-scan the error message string (CPU efficiency).
  */
 const _classificationCache = new WeakMap<Error, boolean>();
 
 /**
+ * @dev Builds a bounded haystack string for keyword classification.
+ * Truncating prevents O(n) scans on arbitrarily long error messages.
+ *
+ * @custom:security This is exported for test introspection only.
+ */
+export function boundedClassificationHaystack(error: Error): string {
+  const raw = `${error.name} ${error.message}`.toLowerCase();
+  return truncateForBounds(raw, MAX_CLASSIFICATION_INPUT_CHARS);
+}
+
+/**
  * @dev Determines whether an error is related to smart contract execution.
- * Result is computed once per error instance and cached on the object to
- * avoid redundant string scans across multiple render cycles (gas efficiency).
+ * Result is computed once per error instance and cached to avoid redundant
+ * string scans across multiple render cycles.
  *
  * @param error The error to classify.
  * @return `true` if the error is contract/blockchain related.
@@ -138,8 +235,6 @@ const _classificationCache = new WeakMap<Error, boolean>();
  * @custom:security This is a best-effort heuristic. Unknown error types default
  * to the generic handler, which is the safer path.
  */
-const _classificationCache = new WeakMap<Error, boolean>();
-
 function isSmartContractError(error: Error): boolean {
   if (_classificationCache.has(error)) {
     return _classificationCache.get(error)!;
@@ -160,8 +255,24 @@ function isSmartContractError(error: Error): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Structured log entry + error report builders
+// Structured log entry + error report
 // ---------------------------------------------------------------------------
+
+/**
+ * @dev Structured log entry emitted by componentDidCatch.
+ * Forwarded to the optional onLog callback for log aggregator integration.
+ */
+export interface BoundaryLogEntry {
+  timestamp: string;
+  level: 'error';
+  message: string;
+  errorMessage: string;
+  errorName: string;
+  isSmartContractError: boolean;
+  componentStack: string | undefined;
+  stack: string | undefined;
+  sequence: number;
+}
 
 export interface ErrorReport {
   message: string;
@@ -191,11 +302,20 @@ export function buildBoundaryLogEntry(
     message: isContract
       ? 'Smart contract error caught by boundary'
       : 'Generic render error caught by boundary',
-    errorMessage: sanitizeErrorMessage(error.message),
-    errorName: error.name,
+    errorMessage: sanitizeErrorMessage(
+      truncateForBounds(error.message, MAX_REPORT_MESSAGE_CHARS),
+    ),
+    errorName: truncateForBounds(error.name, MAX_ERROR_NAME_CHARS),
     isSmartContractError: isContract,
-    componentStack: isDev ? (errorInfo.componentStack ?? undefined) : undefined,
-    stack: isDev ? error.stack : undefined,
+    componentStack: isDev
+      ? truncateForBounds(
+          errorInfo.componentStack ?? '',
+          MAX_REPORT_COMPONENT_STACK_CHARS,
+        )
+      : undefined,
+    stack: isDev && error.stack
+      ? truncateForBounds(error.stack, MAX_REPORT_STACK_CHARS)
+      : undefined,
     sequence,
   };
 }
@@ -233,9 +353,6 @@ export function buildErrorReport(
 // Component types
 // ---------------------------------------------------------------------------
 
-/** Maximum number of retry attempts before the retry button is hidden. */
-export const MAX_RETRIES = 3;
-
 export interface FrontendGlobalErrorBoundaryProps {
   /** @dev The child component tree to protect with this error boundary. */
   children?: ReactNode;
@@ -247,12 +364,13 @@ export interface FrontendGlobalErrorBoundaryProps {
   /**
    * @dev Optional callback invoked with a structured error report whenever an
    * error is caught. Use this to forward errors to Sentry, LogRocket, etc.
+   * Always called regardless of the log rate limit.
    */
   onError?: (report: ErrorReport) => void;
   /**
    * @dev Optional callback invoked with the full structured log entry.
    * Enables callers to forward entries to a log aggregator without re-parsing
-   * console output.
+   * console output. Always called regardless of the log rate limit.
    */
   onLog?: (entry: BoundaryLogEntry) => void;
 }
@@ -278,33 +396,19 @@ interface BoundaryState {
  * rate-limited log entry, and renders an appropriate fallback UI with a
  * "Try Again" recovery path (capped at MAX_RETRIES).
  *
- * Gas-efficiency improvements over the previous version:
- *   - Error classification result is cached via WeakMap so repeated renders
- *     do not re-scan the error message string.
- *   - `onError` is called exactly once per error event (not on every render).
- *   - Retry attempts are capped at MAX_RETRIES to prevent infinite re-render
- *     loops that would waste resources on unrecoverable errors.
- *   - Non-Error thrown values are normalised in getDerivedStateFromError so
- *     componentDidCatch always receives a proper Error object.
- *   - Logging bounds (`truncateForBounds`, `MAX_*` constants) cap classification,
- *     reports, and dev UI text so scripts and observability pipelines stay predictable.
- *
- * Lifecycle:
- *   Error thrown → getDerivedStateFromError (state update) →
- *   componentDidCatch (logging + reporting) → fallback render
- *
  * Logging bounds:
- *   At most LOG_RATE_LIMIT (5) console.error calls are emitted per
- *   LOG_RATE_WINDOW_MS (60 s) rolling window. Subsequent errors within the
- *   window are silently forwarded to the onError callback only, preventing
- *   log flooding while preserving observability.
+ *   At most LOG_RATE_LIMIT (10) console.error calls are emitted per
+ *   LOG_RATE_WINDOW_MS (60 s) sliding window. Subsequent errors within the
+ *   window are silently forwarded to onError/onLog only, preventing log
+ *   flooding while preserving observability.
  *
  * @custom:security
  *   - Stack traces are suppressed in production to prevent information disclosure.
  *   - Error messages are sanitised before logging to strip potential secrets.
- *   - Log entries are rate-limited (10 per 60 s) to prevent flooding.
+ *   - Log entries are rate-limited to prevent flooding / DoS via log exhaustion.
  *   - Fallback UI uses only static strings — no raw error data in innerHTML (XSS safe).
  *   - Classification results are cached via WeakMap to avoid redundant string scans.
+ *   - All string fields are truncated to bounded lengths before forwarding.
  *
  * @custom:limitations
  *   - Does NOT catch errors in async event handlers, setTimeout, or SSR.
@@ -330,7 +434,6 @@ export class FrontendGlobalErrorBoundary extends Component<
 
   /**
    * @dev Updates component state so the next render shows the fallback UI.
-   * Called synchronously during the render phase — must be a pure function.
    * Non-Error thrown values are normalised to Error here so downstream code
    * can always rely on a proper Error instance.
    *
@@ -358,26 +461,39 @@ export class FrontendGlobalErrorBoundary extends Component<
 
   /**
    * @dev Called after an error has been thrown by a descendant component.
-   * Responsible for side-effects: logging and external error reporting.
-   * Invokes `onError` exactly once per caught error to avoid duplicate
-   * reports (gas/cost efficiency for paid observability services).
+   * Emits a rate-limited console.error and always invokes onError/onLog
+   * so external observability services receive every event.
    *
    * @param error The error that was thrown.
    * @param errorInfo React-provided component stack information.
    */
   componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
-    // Use the normalised Error from state (set by getDerivedStateFromError)
-    // rather than the raw thrown value, which may be a non-Error primitive.
     const normalisedError = this.state.error ?? error;
     const isContract = isSmartContractError(normalisedError);
-    const report = buildErrorReport(normalisedError, errorInfo, isContract);
+    this.logSequence += 1;
 
-    console.error(
-      'Documentation Error Boundary caught an error:',
-      error,
+    const logEntry = buildBoundaryLogEntry(
+      normalisedError,
       errorInfo,
+      isContract,
+      this.logSequence,
     );
 
+    // Rate-limited console output — prevents log flooding.
+    if (boundaryRateLimiter.isAllowed()) {
+      console.error(
+        'Documentation Error Boundary caught an error:',
+        error,
+        errorInfo,
+      );
+    }
+
+    // onLog and onError are always called regardless of rate limit.
+    if (typeof this.props.onLog === 'function') {
+      this.props.onLog(logEntry);
+    }
+
+    const report = buildErrorReport(normalisedError, errorInfo, isContract);
     if (typeof this.props.onError === 'function') {
       this.props.onError(report);
     }
@@ -385,8 +501,7 @@ export class FrontendGlobalErrorBoundary extends Component<
 
   /**
    * @dev Resets error state so the child tree is re-rendered.
-   * Capped at MAX_RETRIES to prevent infinite retry loops on unrecoverable
-   * errors — each retry attempt consumes resources (network calls, re-renders).
+   * Capped at MAX_RETRIES to prevent infinite retry loops on unrecoverable errors.
    */
   handleRetry(): void {
     if (this.state.retryCount >= MAX_RETRIES) return;
@@ -415,7 +530,12 @@ export class FrontendGlobalErrorBoundary extends Component<
 
     if (isContract) {
       return (
-        <div role="alert" aria-live="assertive" className="error-boundary error-boundary--contract" style={styles.container}>
+        <div
+          role="alert"
+          aria-live="assertive"
+          className="error-boundary error-boundary--contract"
+          style={styles.container}
+        >
           <span aria-hidden="true" style={styles.icon}>🔗</span>
           <h2 style={styles.title}>Smart Contract Error</h2>
           <p style={styles.message}>
@@ -461,7 +581,12 @@ export class FrontendGlobalErrorBoundary extends Component<
     }
 
     return (
-      <div role="alert" aria-live="assertive" className="error-boundary error-boundary--generic" style={styles.container}>
+      <div
+        role="alert"
+        aria-live="assertive"
+        className="error-boundary error-boundary--generic"
+        style={styles.container}
+      >
         <span aria-hidden="true" style={styles.icon}>⚠️</span>
         <h2 style={styles.title}>Documentation Loading Error</h2>
         <p style={styles.message}>
@@ -508,7 +633,16 @@ export class FrontendGlobalErrorBoundary extends Component<
 // ---------------------------------------------------------------------------
 
 const styles = {
-  container: { padding: '24px', border: '1px solid #ff4d4f', borderRadius: '6px', backgroundColor: '#fff2f0', color: '#cf1322', maxWidth: '600px', margin: '40px auto', fontFamily: 'sans-serif' } as React.CSSProperties,
+  container: {
+    padding: '24px',
+    border: '1px solid #ff4d4f',
+    borderRadius: '6px',
+    backgroundColor: '#fff2f0',
+    color: '#cf1322',
+    maxWidth: '600px',
+    margin: '40px auto',
+    fontFamily: 'sans-serif',
+  } as React.CSSProperties,
   icon: { fontSize: '2rem', display: 'block', marginBottom: '8px' } as React.CSSProperties,
   title: { margin: '0 0 8px', fontSize: '1.25rem', fontWeight: 600 } as React.CSSProperties,
   message: { margin: '0 0 8px', fontSize: '0.95rem', color: '#595959' } as React.CSSProperties,
