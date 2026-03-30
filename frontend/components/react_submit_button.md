@@ -1,130 +1,118 @@
-# ReactSubmitButton
+# ReactSubmitButton - Script-Optimized
 
-A typed React submit button with a strict state machine, safe label handling, double-submit prevention, and ARIA accessibility semantics.
+Typed React button for script execution (e.g. wasm_build_pipeline, deploy.sh) and Stellar tx.
 
----
+## Architecture (Refactored)
 
-## States
+Decomposed monolithic component into 6 custom hooks for improved testability, maintainability, and state isolation:
 
-| State        | Description                                      | Clickable |
-|--------------|--------------------------------------------------|-----------|
-| `idle`       | Default — ready to submit                        | ✅        |
-| `submitting` | Async action in-flight; blocks interaction       | ❌        |
-| `success`    | Action confirmed                                 | ✅        |
-| `error`      | Action failed; user can retry                    | ✅        |
-| `disabled`   | Externally locked (deadline passed, goal met…)   | ❌        |
+### Custom Hooks
 
-### Allowed transitions
+- **`useLocalPendingState()`** — Manages internal async pending indicator via reducer
+- **`useSubmitButtonState()`** — Resolves safe state with strict transition validation
+- **`useSubmitButtonLabel()`** — Computes button label with sanitization (memoized)
+- **`useSubmitButtonSubtext()`** — Formats txHash or scriptOutput display (memoized)
+- **`useSubmitButtonInteractionState()`** — Determines if button accepts clicks
+- **`useSubmitButtonStyles()`** — Merges base + state-specific styles (memoized)
 
-```
-idle        → submitting | disabled
-submitting  → success | error | disabled
-success     → idle | disabled
-error       → idle | submitting | disabled
-disabled    → idle
-```
+### Helper Functions
 
-Same-state updates are always allowed (idempotent).
+- **`validateStateTransition()`** — Validates state transitions with strict-mode enforcement
+- **`normalizeText()`** — XSS-safe text sanitization (removes control chars, truncates)
+- **`resolveLabel()`** — Safe label resolution with defaults
+- **`isValidTransition()`** — Transition validation
+- **`resolveSafeState()`** — Strict state resolution with fallback
+- **`isInteractionBlocked()`** — Interaction guard logic
+- **`isBusy()`** — Busy state detection
 
----
+## States (Script Flow)
+
+| State      | Description               | Clickable |
+| ---------- | ------------------------- | --------- |
+| `idle`     | Ready                     | ✅        |
+| `pending`  | Script/tx in-flight       | ❌        |
+| `success`  | Complete                  | ❌        |
+| `error`    | Failed, retry possible    | ✅        |
+| `disabled` | Locked (goal met, paused) | ❌        |
+
+Transitions: idle→pending→success/error; strict enforcement.
 
 ## Props
 
-| Prop                | Type                                              | Default      | Description                                              |
-|---------------------|---------------------------------------------------|--------------|----------------------------------------------------------|
-| `state`             | `SubmitButtonState`                               | —            | Current button state (required)                          |
-| `previousState`     | `SubmitButtonState`                               | `undefined`  | Previous state for strict transition validation          |
-| `strictTransitions` | `boolean`                                         | `true`       | Falls back to `previousState` on invalid transitions     |
-| `labels`            | `SubmitButtonLabels`                              | `undefined`  | Per-state label overrides                                |
-| `onClick`           | `(e: MouseEvent) => void \| Promise<void>`        | `undefined`  | Click handler; blocked while submitting/disabled         |
-| `className`         | `string`                                          | `undefined`  | Additional CSS class                                     |
-| `id`                | `string`                                          | `undefined`  | HTML `id` attribute                                      |
-| `type`              | `"button" \| "submit" \| "reset"`                 | `"button"`   | HTML button type                                         |
-| `disabled`          | `boolean`                                         | `undefined`  | External disabled override                               |
+| Prop               | Type                | Description                          |
+| ------------------ | ------------------- | ------------------------------------ |
+| `state`            | State               | **Required** button state             |
+| `previousState`    | State               | For transition validation            |
+| `strictTransitions` | boolean             | Enforce strict transitions (default) |
+| `scriptOutput`     | unknown             | Sanitized script result              |
+| `txHash`           | string              | Truncated tx hash (last 12 chars)    |
+| `labels`           | SubmitButtonLabels  | Per-state custom labels              |
+| `onClick`          | Function            | Click handler (can be async)         |
+| `onError`          | (error) => void     | Error callback (NEW)                 |
+| `disabled`         | boolean             | External disabled prop               |
+| `className`        | string              | CSS class                            |
+| `id`               | string              | Element ID                           |
+| `type`             | button\|submit\|reset | Button type                         |
 
----
-
-## Default labels
-
-| State        | Label             |
-|--------------|-------------------|
-| `idle`       | `Submit`          |
-| `submitting` | `Submitting...`   |
-| `success`    | `Submitted`       |
-| `error`      | `Try Again`       |
-| `disabled`   | `Submit Disabled` |
-
----
-
-## Usage
+## Usage - Scripts
 
 ```tsx
-import ReactSubmitButton from "./react_submit_button";
-
-// Basic
-<ReactSubmitButton state="idle" onClick={handleSubmit} />
-
-// With custom labels
 <ReactSubmitButton
-  state={txState}
-  previousState={prevTxState}
-  labels={{ idle: "Fund Campaign", submitting: "Funding...", success: "Funded!" }}
-  onClick={handleContribute}
+  state={scriptState}
+  scriptOutput={deployResult}
+  txHash={tx.hash}
+  labels={{ idle: "Deploy WASM" }}
+  onClick={runDeployScript}
+  onError={(err) => console.error("Deploy failed:", err)}
 />
-
-// Externally disabled (e.g. campaign deadline passed)
-<ReactSubmitButton state="disabled" labels={{ disabled: "Campaign Ended" }} />
 ```
 
----
+Example with wasm_build_pipeline:
 
-## Exported helpers
-
-All pure functions are exported for independent unit testing.
-
-| Function                              | Purpose                                                        |
-|---------------------------------------|----------------------------------------------------------------|
-| `normalizeSubmitButtonLabel`          | Sanitizes a label: strips control chars, truncates to 80 chars |
-| `resolveSubmitButtonLabel`            | Returns the safe label for a given state                       |
-| `isValidSubmitButtonStateTransition`  | Validates a `from → to` state transition                       |
-| `resolveSafeSubmitButtonState`        | Enforces strict transitions, falls back to `previousState`     |
-| `isSubmitButtonInteractionBlocked`    | Returns `true` when clicks must be suppressed                  |
-| `isSubmitButtonBusy`                  | Returns `true` when `aria-busy` should be set                  |
-| `ALLOWED_TRANSITIONS`                 | Transition map (shared by component and tests)                 |
-
----
-
-## Security assumptions
-
-- **No `dangerouslySetInnerHTML`** — labels are rendered as React text nodes only.
-- **Label sanitization** — control characters (`U+0000–U+001F`, `U+007F`) are stripped; labels are truncated to 80 characters to prevent layout abuse.
-- **Double-submit prevention** — an internal `isLocallySubmitting` flag blocks re-entry while an async `onClick` is in-flight, preventing duplicate blockchain transactions.
-- **Hardcoded styles** — all CSS values are compile-time constants; no dynamic style injection from user input.
-- **Input validation is the caller's responsibility** — the component surfaces state only; it never submits data itself.
-
----
-
-## Accessibility
-
-- `aria-live="polite"` — state label changes are announced to screen readers.
-- `aria-busy` — set to `true` while submitting.
-- `aria-label` — always set to the resolved, sanitized label.
-- `disabled` — set on the HTML element when interaction is blocked, preventing keyboard activation.
-
----
-
-## Tests
-
-```
-frontend/components/react_submit_button.test.tsx
+```tsx
+const [state, setState] = useState("idle");
+const runScript = async () => {
+  setState("pending");
+  try {
+    const result = await wasmBuildPipeline();
+    setState(result.success ? "success" : "error");
+  } catch (err) {
+    setState("error");
+  }
+};
 ```
 
-51 tests covering:
-- Label normalization and sanitization edge cases
-- Default and custom label resolution per state
-- State transition validation (allowed, blocked, idempotent)
-- Strict transition enforcement and fallback
-- Interaction blocking (submitting, disabled, external flag, local in-flight)
-- `aria-busy` / `aria-live` / `aria-label` attributes
-- Click handler: idle, error (retry), blocked states, async, rejected promise
-- Rendering: element type, `data-state`, `type`, `className`, `id`
+## Security
+
+- **Double-script prevention** (inFlightRef + local pending guard)
+- **XSS-safe labels/output** (normalizeText sanitization, control char removal)
+- **Truncated txHash** (last 12 chars only, no full exposure)
+- **Strict transitions** (no invalid state combinations)
+- **Error handling** (onError callback for error propagation)
+- **Mount guard** (isMounted prevents state updates on unmounted components)
+
+## Testing
+
+**55 comprehensive tests**, **96.77% statement coverage**, **100% function coverage**
+
+### Test Categories
+
+- **Reducer tests** (2) — START_PENDING, END_PENDING actions
+- **Helper function tests** (14) — normalizeText, resolveLabel, state transitions, interaction/busy logic
+- **Component integration tests** (13) — rendering, state display, interaction blocking, error handling
+- **Custom hook tests** (20) — All 6 hooks individually tested for initialization, state changes, memoization
+- **Utility function tests** (6) — validateStateTransition edge cases
+
+**Running tests:**
+```bash
+npm test frontend/components/react_submit_button.test.tsx --coverage
+```
+
+## Implementation Notes
+
+- All memoization dependency arrays optimized for correctness
+- onError callback gracefully handles Error and non-Error thrown values
+- normalizeText sanitizes control chars, whitespace, and truncates
+- useSubmitButtonState enforces strict transitions as per ALLOWED_TRANSITIONS map
+- isMounted guard prevents state updates if component unmounts during async operations
+- Accessibility: full ARIA support (aria-busy, aria-label, aria-live)

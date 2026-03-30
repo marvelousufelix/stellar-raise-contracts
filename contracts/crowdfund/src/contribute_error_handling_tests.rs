@@ -3,24 +3,20 @@
 //! Covers:
 //! - Happy path: single and accumulated contributions
 //! - `CampaignNotActive` — status guard fires first
-//! - `NegativeAmount` — negative amount rejected
-//! - `ZeroAmount` — zero amount rejected
-//! - `BelowMinimum` — amount below min_contribution
-//! - `CampaignEnded` — contribution after deadline
-//! - Exact-deadline boundary — accepted (strict `>` check)
-//! - `describe_error` helper coverage for all known codes
-//! - `is_retryable` — input errors retryable, state errors not
-//! - Diagnostic events emitted on each error path
-//! - No diagnostic event emitted on success
+//! - `NegativeAmount` — negative amount rejected (no diagnostic event)
+//! - `ZeroAmount` / `BelowMinimum` — amount validation
+//! - `CampaignEnded` — contribution after deadline; exact-deadline boundary
+//! - `describe_error` / `is_retryable` helpers
+//! - Diagnostic events on each logged error path
 
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
-    token, Address, Env, Symbol,
+    token, Address, Env, Symbol, TryFromVal,
 };
 
 use crate::{contribute_error_handling, ContractError, CrowdfundContract, CrowdfundContractClient};
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+// ── helpers ───────────────────────────────────────────────────────────────────
 
 const GOAL: i128 = 1_000;
 const MIN: i128 = 10;
@@ -36,7 +32,7 @@ fn setup() -> (Env, CrowdfundContractClient<'static>, Address) {
     let token_admin = Address::generate(&env);
     let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token_addr = token_id.address();
-    let sac = token::StellarAssetClient::new(&env, &token_addr);
+    let asset_client = token::StellarAssetClient::new(&env, &token_addr);
 
     let creator = Address::generate(&env);
     let contributor = Address::generate(&env);
@@ -60,7 +56,28 @@ fn setup() -> (Env, CrowdfundContractClient<'static>, Address) {
     (env, client, contributor)
 }
 
-// ── happy path ────────────────────────────────────────────────────────────────
+/// Returns the last `contribute_error` event as `(variant_symbol, error_code)`.
+fn last_contribute_error_event(env: &Env) -> Option<(Symbol, u32)> {
+    let want = soroban_sdk::String::from_str(env, "contribute_error");
+    env.events()
+        .all()
+        .iter()
+        .rev()
+        .find_map(|(_, topics, data)| {
+            if topics.len() < 2 {
+                return None;
+            }
+            let t0 = soroban_sdk::String::try_from_val(env, &topics.get(0)?).ok()?;
+            if t0 != want {
+                return None;
+            }
+            let t1 = Symbol::try_from_val(env, &topics.get(1)?).ok()?;
+            let code = u32::try_from_val(env, &data).ok()?;
+            Some((t1, code))
+        })
+}
+
+// ── happy path ───────────────────────────────────────────────────────────────
 
 #[test]
 fn contribute_happy_path() {
@@ -81,12 +98,11 @@ fn contribute_accumulates_multiple_contributions() {
     assert_eq!(client.total_raised(), MIN * 2);
 }
 
-// ── CampaignNotActive ─────────────────────────────────────────────────────────
+// ── CampaignNotActive ────────────────────────────────────────────────────────
 
 #[test]
 fn contribute_to_finalized_campaign_returns_not_active() {
     let (env, client, contributor) = setup();
-    // Advance past deadline and finalize (goal not met → Expired)
     env.ledger()
         .set_timestamp(env.ledger().timestamp() + DEADLINE_OFFSET + 1);
     client.finalize();
@@ -97,7 +113,7 @@ fn contribute_to_finalized_campaign_returns_not_active() {
     );
 }
 
-// ── NegativeAmount ────────────────────────────────────────────────────────────
+// ── NegativeAmount ─────────────────────────────────────────────────────────────
 
 #[test]
 fn contribute_negative_amount_returns_negative_amount_error() {
@@ -155,33 +171,20 @@ fn contribute_exactly_at_deadline_is_accepted() {
     assert_eq!(client.total_raised(), MIN);
 }
 
-// ── CampaignNotActive after successful campaign ───────────────────────────────
-
 #[test]
 fn contribute_to_successful_campaign_returns_not_active() {
     let (env, client, contributor) = setup();
     env.ledger().set_timestamp(env.ledger().timestamp() + 1);
-    // Fund to goal
     client.contribute(&contributor, &GOAL);
-    // Advance past deadline and finalize
     env.ledger()
         .set_timestamp(env.ledger().timestamp() + DEADLINE_OFFSET);
     client.finalize();
     client.withdraw();
-    // Now try to contribute
     let result = client.try_contribute(&contributor, &MIN);
     assert_eq!(
         result.unwrap_err().unwrap(),
         ContractError::CampaignNotActive
     );
-}
-
-// ── Overflow error code constant correctness ──────────────────────────────────
-
-#[test]
-fn overflow_error_code_matches_contract_error_repr() {
-    assert_eq!(contribute_error_handling::error_codes::OVERFLOW, 6);
-    assert_eq!(ContractError::Overflow as u32, 6);
 }
 
 // ── error_codes constants ─────────────────────────────────────────────────────
@@ -202,6 +205,10 @@ fn error_code_constants_match_contract_error_repr() {
     assert_eq!(
         error_codes::CAMPAIGN_NOT_ACTIVE,
         ContractError::CampaignNotActive as u32
+    );
+    assert_eq!(
+        error_codes::NEGATIVE_AMOUNT,
+        ContractError::NegativeAmount as u32
     );
 }
 
@@ -321,6 +328,19 @@ fn error_event_emitted_on_campaign_not_active() {
     assert_eq!(
         code,
         contribute_error_handling::error_codes::CAMPAIGN_NOT_ACTIVE
+    );
+}
+
+#[test]
+fn error_event_emitted_on_negative_amount() {
+    let (env, client, contributor) = setup();
+    env.ledger().set_timestamp(env.ledger().timestamp() + 1);
+    let _ = client.try_contribute(&contributor, &-1);
+    let (variant, code) = last_contribute_error_event(&env).expect("no event emitted");
+    assert_eq!(variant, Symbol::new(&env, "NegativeAmount"));
+    assert_eq!(
+        code,
+        contribute_error_handling::error_codes::NEGATIVE_AMOUNT
     );
 }
 

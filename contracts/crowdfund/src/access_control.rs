@@ -18,9 +18,15 @@
 
 #![allow(dead_code)]
 
-use soroban_sdk::{Address, Env, Symbol};
+use soroban_sdk::{contracttype, Address, Env, Symbol};
 
 use crate::{ContractError, DataKey, PlatformConfig};
+
+#[derive(Clone)]
+#[contracttype]
+enum AccessControlKey {
+    PendingDefaultAdmin,
+}
 
 // ── Role helpers ─────────────────────────────────────────────────────────────
 
@@ -222,4 +228,89 @@ pub fn transfer_pauser(env: &Env, caller: &Address, new_pauser: &Address) {
         ),
         (caller.clone(), new_pauser.clone()),
     );
+}
+
+/// @notice Proposes a new `DEFAULT_ADMIN_ROLE` in a two-step handoff.
+/// @dev    Only current admin can propose. New admin must call
+///         `accept_default_admin_role` to complete transfer.
+pub fn propose_default_admin_transfer(env: &Env, caller: &Address, pending_admin: &Address) {
+    caller.require_auth();
+
+    let admin = get_default_admin(env);
+    if *caller != admin {
+        panic!("only DEFAULT_ADMIN_ROLE can propose admin transfer");
+    }
+
+    assert!(*pending_admin != admin, "pending admin must differ");
+
+    env.storage()
+        .instance()
+        .set(&AccessControlKey::PendingDefaultAdmin, pending_admin);
+
+    env.events().publish(
+        (
+            Symbol::new(env, "access"),
+            Symbol::new(env, "admin_transfer_proposed"),
+        ),
+        (caller.clone(), pending_admin.clone()),
+    );
+}
+
+/// @notice Cancels a pending admin transfer proposal.
+/// @dev    Only current admin can cancel.
+pub fn cancel_default_admin_transfer(env: &Env, caller: &Address) {
+    caller.require_auth();
+
+    let admin = get_default_admin(env);
+    if *caller != admin {
+        panic!("only DEFAULT_ADMIN_ROLE can cancel admin transfer");
+    }
+
+    env.storage()
+        .instance()
+        .remove(&AccessControlKey::PendingDefaultAdmin);
+
+    env.events().publish(
+        (
+            Symbol::new(env, "access"),
+            Symbol::new(env, "admin_transfer_cancelled"),
+        ),
+        caller.clone(),
+    );
+}
+
+/// @notice Accepts a pending admin proposal and finalizes transfer.
+/// @dev    Must be called by the exact pending admin address.
+pub fn accept_default_admin_role(env: &Env, caller: &Address) {
+    caller.require_auth();
+
+    let pending: Address = env
+        .storage()
+        .instance()
+        .get(&AccessControlKey::PendingDefaultAdmin)
+        .expect("no pending admin transfer");
+
+    if *caller != pending {
+        panic!("only pending admin can accept");
+    }
+
+    env.storage().instance().set(&DataKey::DefaultAdmin, caller);
+    env.storage()
+        .instance()
+        .remove(&AccessControlKey::PendingDefaultAdmin);
+
+    env.events().publish(
+        (
+            Symbol::new(env, "access"),
+            Symbol::new(env, "admin_transfer_accepted"),
+        ),
+        caller.clone(),
+    );
+}
+
+/// @notice Returns the pending admin, if a proposal exists.
+pub fn get_pending_default_admin(env: &Env) -> Option<Address> {
+    env.storage()
+        .instance()
+        .get(&AccessControlKey::PendingDefaultAdmin)
 }
